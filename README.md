@@ -31,7 +31,7 @@ Still pending for the assessment submission:
 
 - Authenticated TSG Channel simulator UI capture and ≤3-minute recording.
 - Native human takeover/delivery/hand-back proof.
-- Approved GitHub remote, evaluator-accessible Drive package and sent email receipt.
+- Evaluator-accessible Drive package and sent email receipt.
 
 See `docs/DEPLOYMENT_FIELD_NOTES.md` for the evidence summary and honest limitations.
 
@@ -83,4 +83,4 @@ Sandbox only. No live merchant data, real WhatsApp numbers, production payment k
 
 ## AI usage declaration
 
-Architecture, skill instructions, documentation and backend source were generated and refined with ChatGPT (GPT-6). Codex subsequently performed live VPS, Chord API, tool-call and sandbox-ledger verification and prepared the submission documentation. Human review remains responsible for the final simulator recording, repository destination, Drive sharing and email submission.
+Architecture, skill instructions, documentation and backend source were generated and refined with ChatGPT (GPT-6). Codex subsequently performed live VPS, Chord API, tool-call and sandbox-ledger verification and prepared the submission documentation. Human review remains responsible for the final simulator recording, Drive sharing and email submission.

@@ -4,7 +4,7 @@ Populate only after each destination has been opened from an external/incognito 
 
 | Artifact | Verified URL / reference | Status |
 | --- | --- | --- |
-| Source repository | https://github.com/Suqsuqx/tally-chord-reconciliation | Prepared for public push |
+| Source repository | https://github.com/Suqsuqx/tally-chord-reconciliation | Public and externally verified 6 Nov 2026 |
 | Live sandbox health | https://tally.mbrelabs.world/healthz | Verified 6 Nov 2026 |
 | TSG Channel simulator conversation | Pending authenticated recording pass | Needs verification |
 | ≤3-minute demo video | Pending | Not created |
