@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+.venv/
+.pytest_cache/
+*.pyc
+*.log
+*.db
+*.db-*
+data/
+backups/
+traces/
+outputs/

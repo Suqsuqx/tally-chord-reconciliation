@@ -1,0 +1,19 @@
+[Unit]
+Description=Tally Sandbox Chord MCP Service
+After=network.target
+
+[Service]
+Type=simple
+User=tally
+Group=tally
+WorkingDirectory=/opt/tally/current
+EnvironmentFile=/opt/tally/current/.env
+ExecStart=/opt/tally/current/.venv/bin/uvicorn server.app:app --host 127.0.0.1 --port 8787 --workers 1
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

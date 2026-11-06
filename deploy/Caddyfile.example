@@ -1,0 +1,6 @@
+# DNS A/AAAA record must point the hostname to your VPS; Caddy handles TLS.
+# Merge this site block with the VPS's existing Caddy config; do not overwrite other sites.
+tally.YOUR_DOMAIN.example {
+    encode gzip
+    reverse_proxy 127.0.0.1:8787
+}
