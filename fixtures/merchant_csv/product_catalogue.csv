@@ -1,0 +1,4 @@
+sku,product_name,description,price_ngn,unit,opening_stock,availability,category
+cup-choc,Chocolate cupcake,"Rich chocolate cupcake, sold individually.",2500,piece,14,Available,Cupcakes
+cup-vanilla,Vanilla cupcake,"Classic vanilla cupcake, sold individually.",2000,piece,0,Out of stock,Cupcakes
+brownie,Brownie box,"Chocolate brownies, sold per box.",6500,box,5,Available,Brownies
