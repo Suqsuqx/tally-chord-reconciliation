@@ -6,7 +6,7 @@ import hashlib
 import time
 import pytest
 from fastapi.testclient import TestClient
-from server.app import app
+from server.app import app,mcp_context_shape
 from server.business import (seed,issue_link_code,link_identity,get_catalog,upsert_product,
     create_order,record_payment_claim,get_my_order,get_reconciliation_report,get_inventory_alerts,
     get_merchant_catchup,update_order_status,create_support_case,list_support_cases,
@@ -30,6 +30,25 @@ def pay_http(order_id, amount_minor, event_id=None, invalid=False, currency="NGN
     sig='sha256='+hmac.new(os.environ['TALLY_WEBHOOK_SECRET'].encode(),ts.encode()+b'.'+body,hashlib.sha256).hexdigest()
     if invalid:sig='sha256='+'0'*64
     return TestClient(app).post('/sandbox/provider-event',content=body,headers={'X-Tally-Timestamp':ts,'X-Tally-Signature':sig,'Content-Type':'application/json'})
+
+def test_mcp_context_shape_records_names_not_values():
+    shape=mcp_context_shape({
+        'jsonrpc':'2.0',
+        'method':'tools/call',
+        '_meta':{'authenticated_principal':'DO_NOT_LOG_THIS_VALUE'},
+        'params':{
+            'name':'get_catalog',
+            '_meta':{'sender_id':'DO_NOT_LOG_THIS_SENDER','session_id':'DO_NOT_LOG_THIS_SESSION'},
+            'arguments':{'_meta':{'thread_id':'DO_NOT_LOG_THIS_THREAD'}},
+        },
+    })
+    assert shape['body_keys']==['_meta','jsonrpc','method','params']
+    assert shape['params_keys']==['_meta','arguments','name']
+    assert shape['top_meta_keys']==['authenticated_principal']
+    assert shape['params_meta_keys']==['sender_id','session_id']
+    assert shape['argument_keys']==['_meta']
+    assert shape['arguments_meta_keys']==['thread_id']
+    assert 'DO_NOT_LOG' not in json.dumps(shape)
 
 def test_two_roles_restrict_data_and_edits():
     customer=sess('cust-ada','shop'); another=sess('cust-bola','shop');op=sess('staff-tola','desk')

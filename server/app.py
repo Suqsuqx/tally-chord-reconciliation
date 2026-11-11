@@ -18,6 +18,27 @@ logger=logging.getLogger('uvicorn.error')
 def session_fingerprint(value):
     return hashlib.sha256(value.encode()).hexdigest()[:12] if value else None
 
+def _key_names(value):
+    """Return bounded JSON object key names without inspecting or logging values."""
+    if not isinstance(value,dict):
+        return []
+    return sorted(str(key).replace('\r','\\r').replace('\n','\\n')[:80] for key in value)[:50]
+
+def mcp_context_shape(data):
+    """Describe possible MCP context containers using key names only."""
+    params=data.get('params') if isinstance(data,dict) else None
+    params=params if isinstance(params,dict) else {}
+    arguments=params.get('arguments')
+    arguments=arguments if isinstance(arguments,dict) else {}
+    return {
+        'body_keys':_key_names(data),
+        'params_keys':_key_names(params),
+        'top_meta_keys':_key_names(data.get('_meta')) if isinstance(data,dict) else [],
+        'params_meta_keys':_key_names(params.get('_meta')),
+        'argument_keys':_key_names(arguments),
+        'arguments_meta_keys':_key_names(arguments.get('_meta')),
+    }
+
 @asynccontextmanager
 async def lifespan(app):
     if os.getenv('TALLY_ENV','sandbox')!='sandbox':
@@ -47,9 +68,17 @@ async def mcp_endpoint(request:Request,channel:str):
         method=data.get('method')
         incoming_session=request.headers.get('mcp-session-id','')
         if method in ('initialize','tools/call'):
-            logger.info('tally_mcp_context channel=%s method=%s tool=%s session_present=%s session_fp=%s header_names=%s',
-                        channel,method,(data.get('params') or {}).get('name'),bool(incoming_session),
-                        session_fingerprint(incoming_session),','.join(sorted(request.headers.keys())))
+            shape=mcp_context_shape(data)
+            params=data.get('params') if isinstance(data.get('params'),dict) else {}
+            logger.info('tally_mcp_context channel=%s method=%s tool=%s session_present=%s session_fp=%s header_names=%s body_keys=%s params_keys=%s top_meta_keys=%s params_meta_keys=%s argument_keys=%s arguments_meta_keys=%s',
+                        channel,method,params.get('name'),bool(incoming_session),
+                        session_fingerprint(incoming_session),','.join(sorted(request.headers.keys())),
+                        json.dumps(shape['body_keys'],separators=(',',':')),
+                        json.dumps(shape['params_keys'],separators=(',',':')),
+                        json.dumps(shape['top_meta_keys'],separators=(',',':')),
+                        json.dumps(shape['params_meta_keys'],separators=(',',':')),
+                        json.dumps(shape['argument_keys'],separators=(',',':')),
+                        json.dumps(shape['arguments_meta_keys'],separators=(',',':')))
         result=process(channel,data)
         headers={'MCP-Protocol-Version':'2025-03-26'}
         if method=='initialize':
