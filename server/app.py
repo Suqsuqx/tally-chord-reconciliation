@@ -114,3 +114,7 @@ async def provider_event(request:Request):
         return JSONResponse(result)
     except (json.JSONDecodeError,ToolFailure) as ex:
         return JSONResponse({'error':getattr(ex,'code','INVALID_JSON'),'message':str(ex)},status_code=400)
+
+# Opt-in Paystack test webhook; disabled unless credentials and tenant map are configured.
+from .paystack_webhook import router as paystack_webhook_router
+app.include_router(paystack_webhook_router)
