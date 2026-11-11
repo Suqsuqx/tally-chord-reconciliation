@@ -109,6 +109,9 @@ def test_mcp_discovery_role_isolation_and_real_tool_invocation():
     assert client.post('/mcp/shop',json={'jsonrpc':'2.0','id':1,'method':'tools/list'}).status_code==401
     shop_h={'Authorization':'Bearer SHOP_SUPER_LONG_RANDOM_TEST_SECRET'}
     desk_h={'Authorization':'Bearer DESK_OTHER_LONG_RANDOM_TEST_SECRET'}
+    initialized=client.post('/mcp/shop',headers=shop_h,json={'jsonrpc':'2.0','id':1,'method':'initialize'})
+    assert initialized.status_code==200
+    assert len(initialized.headers['mcp-session-id'])>=24
     shop=client.post('/mcp/shop',headers=shop_h,json={'jsonrpc':'2.0','id':2,'method':'tools/list'}).json()
     desk=client.post('/mcp/desk',headers=desk_h,json={'jsonrpc':'2.0','id':3,'method':'tools/list'}).json()
     s_names={x['name'] for x in shop['result']['tools']};d_names={x['name'] for x in desk['result']['tools']}

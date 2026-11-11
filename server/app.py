@@ -3,6 +3,8 @@ import os
 import hmac
 import hashlib
 import json
+import logging
+import secrets
 from datetime import datetime,timezone
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
@@ -10,6 +12,11 @@ from .db import init_db
 from contextlib import asynccontextmanager
 from .business import seed, ingest_verified_payment, ToolFailure
 from .mcp import process
+
+logger=logging.getLogger('uvicorn.error')
+
+def session_fingerprint(value):
+    return hashlib.sha256(value.encode()).hexdigest()[:12] if value else None
 
 @asynccontextmanager
 async def lifespan(app):
@@ -37,8 +44,19 @@ async def mcp_endpoint(request:Request,channel:str):
         data=await request.json()
         if isinstance(data,list):return JSONResponse({'error':'Batch JSON-RPC not implemented'},status_code=400)
         if not isinstance(data,dict):return JSONResponse({'error':'Invalid JSON-RPC request'},status_code=400)
+        method=data.get('method')
+        incoming_session=request.headers.get('mcp-session-id','')
+        if method in ('initialize','tools/call'):
+            logger.info('tally_mcp_context channel=%s method=%s tool=%s session_present=%s session_fp=%s header_names=%s',
+                        channel,method,(data.get('params') or {}).get('name'),bool(incoming_session),
+                        session_fingerprint(incoming_session),','.join(sorted(request.headers.keys())))
         result=process(channel,data)
-        return Response(status_code=202) if result is None else JSONResponse(result,headers={'MCP-Protocol-Version':'2025-03-26'})
+        headers={'MCP-Protocol-Version':'2025-03-26'}
+        if method=='initialize':
+            issued_session=secrets.token_urlsafe(24)
+            headers['Mcp-Session-Id']=issued_session
+            logger.info('tally_mcp_session_issued channel=%s session_fp=%s',channel,session_fingerprint(issued_session))
+        return Response(status_code=202) if result is None else JSONResponse(result,headers=headers)
     except json.JSONDecodeError:
         return JSONResponse({'error':'Invalid JSON'},status_code=400)
 

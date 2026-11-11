@@ -114,8 +114,11 @@ def mcp_ids(item: dict) -> list[str]:
 
 
 def tool_names(payload: object) -> set[str]:
-    obj = unwrap(payload)
-    value: object = obj.get("tools") or obj.get("items") or obj.get("data")
+    if isinstance(payload, list):
+        value: object = payload
+    else:
+        obj = unwrap(payload)
+        value = obj.get("tools") or obj.get("items") or obj.get("data")
     if isinstance(value, dict):
         value = value.get("tools") or value.get("items")
     result: set[str] = set()
