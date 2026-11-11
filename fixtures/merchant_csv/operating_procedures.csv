@@ -1,0 +1,10 @@
+topic,step,procedure
+Order processing,1,"Confirm selected products, quantity and availability"
+Order processing,2,Confirm pickup or delivery arrangement and final total
+Order processing,3,Check matching payment confirmation before preparing paid orders
+Order processing,4,"Prepare, pack and update order status"
+Stock control,1,Check prepared stock and sold-out items at opening
+Stock control,2,Record restocked quantities as physical counts
+Complaints,1,"Record order reference, issue and relevant photos"
+Complaints,2,Refer refund or replacement decision to the shop owner
+Payments,1,Compare received Paystack payment references and amounts with orders
