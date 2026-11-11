@@ -30,6 +30,8 @@ Each tool is exposed through **one** of two authenticated public HTTPS endpoints
 | `list_support_cases` | Both | Support queue. |
 | `reply_support_case` | Both | Case-scoped recorded merchant response, delivery not presumed. |
 
+When a sandbox Admin successfully uses the existing `link_identity` tool and a provider connection feature is enabled, that same result includes short-lived private setup links for configured providers. Operators never receive setup links. This preserves the exact eleven-tool Desk allowlist; links authorize setup only after the backend has already validated the Admin session.
+
 ## Provider-only, not an MCP tool
 
 `POST /sandbox/provider-event` validates HMAC-SHA256 of `{timestamp}.{raw body}` and rejects timestamps outside five minutes. It accepts `event_id`, `reference` (order ID), `amount_minor`, `currency=NGN`, `event_status=success`. Replays with the same `event_id` are idempotent. A verified provider event with mismatched data is recorded as an exception, **not** matched to the order. Tool registration credentials cannot access it without the separate provider signing secret.
@@ -40,4 +42,4 @@ The backend now distinguishes individual test Admin/Operator/Customer sessions. 
 
 ## MCP transport note
 
-This project implements stateless JSON-RPC `initialize`, `ping`, `tools/list` and `tools/call` over Streamable HTTP. On 6 November 2026, Chord health and discovery returned exactly seven Shop and eleven Desk tools, and persisted Chord external-chat turns successfully invoked both servers. Authenticated TSG Channel simulator UI capture remains a separate acceptance gate.
+This project implements stateless JSON-RPC `initialize`, `ping`, `tools/list` and `tools/call` over Streamable HTTP. On 6 November 2026, Chord health and discovery returned exactly seven Shop and eleven Desk tools, and persisted Chord external-chat turns successfully invoked both servers. The provider branch keeps those counts unchanged, but has not yet been deployed or re-probed through Chord. Authenticated TSG Channel simulator UI capture remains a separate acceptance gate.

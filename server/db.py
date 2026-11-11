@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS provider_setup_sessions (
  token_hash TEXT PRIMARY KEY, business_id TEXT NOT NULL, actor_id TEXT NOT NULL,
  provider TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT
 );
+CREATE TABLE IF NOT EXISTS provider_oauth_states (
+ state_hash TEXT PRIMARY KEY, business_id TEXT NOT NULL, actor_id TEXT NOT NULL,
+ provider TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS provider_connections (
  id TEXT PRIMARY KEY, business_id TEXT NOT NULL, provider TEXT NOT NULL,
  environment TEXT NOT NULL, credentials_ciphertext TEXT NOT NULL,

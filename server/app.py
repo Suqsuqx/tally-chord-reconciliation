@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from .business import seed, ingest_verified_payment, ToolFailure
 from .mcp import process
 from .paystack_connections import complete_paystack_setup
+from .notion_connections import cancel_notion_oauth, complete_notion_oauth, start_notion_oauth
 
 logger=logging.getLogger('uvicorn.error')
 
@@ -146,6 +147,56 @@ async def paystack_connect(request:Request):
         return JSONResponse(result)
     except (json.JSONDecodeError,ValueError,ToolFailure):
         return JSONResponse({'error':'CONNECTION_FAILED','message':'Connection failed. Request a new setup link.'},status_code=400)
+
+NOTION_SETUP_HTML="""<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connect Notion to Tally</title>
+<style>body{font:16px system-ui;max-width:34rem;margin:3rem auto;padding:0 1rem}button{padding:.8rem 1rem}</style>
+<h1>Connect Notion</h1>
+<p>Notion will ask you to choose the ASYAN SHOP pages Tally may read. Nothing is imported until you approve a preview.</p>
+<button id="connect">Choose pages in Notion</button><p id="result" role="status"></p>
+<script>const token=new URLSearchParams(location.hash.slice(1)).get('token')||'';history.replaceState(null,'',location.pathname);
+document.querySelector('#connect').addEventListener('click',async()=>{const result=document.querySelector('#result');result.textContent='Opening Notion…';
+const response=await fetch('/integrations/notion/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({setup_token:token})});
+const body=await response.json();if(response.ok&&body.authorize_url){location.assign(body.authorize_url);return;}result.textContent=body.message||'Connection failed. Request a new setup link.';});</script>"""
+
+NO_STORE_HEADERS={'Cache-Control':'no-store','Referrer-Policy':'no-referrer',
+                  'Content-Security-Policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}
+
+@app.get('/integrations/notion/setup')
+async def notion_setup_page():
+    return HTMLResponse(NOTION_SETUP_HTML,headers=NO_STORE_HEADERS)
+
+@app.post('/integrations/notion/start')
+async def notion_start(request:Request):
+    try:
+        raw=await request.body()
+        if not raw or len(raw)>4*1024:raise ValueError('Invalid setup request')
+        data=json.loads(raw)
+        if not isinstance(data,dict):raise ValueError('Invalid setup request')
+        return JSONResponse(start_notion_oauth(data.get('setup_token')),headers={'Cache-Control':'no-store'})
+    except (json.JSONDecodeError,ValueError,ToolFailure):
+        return JSONResponse({'error':'CONNECTION_FAILED','message':'Connection failed. Request a new setup link.'},
+                            status_code=400,headers={'Cache-Control':'no-store'})
+
+@app.get('/integrations/notion/callback')
+async def notion_callback(request:Request):
+    code=request.query_params.get('code')
+    state=request.query_params.get('state')
+    denied=request.query_params.get('error')
+    if denied:
+        cancel_notion_oauth(state)
+        return HTMLResponse('<!doctype html><meta charset="utf-8"><title>Notion not connected</title><p>Notion access was not granted. Return to Tally and request a new setup link if you want to try again.</p>',
+                            status_code=400,headers=NO_STORE_HEADERS)
+    try:
+        result=await complete_notion_oauth(code,state)
+        count=len(result['authorized_resources'])
+        readable=sum(item.get('read_status')=='readable' for item in result['authorized_resources'])
+        body=f'<!doctype html><meta charset="utf-8"><title>Notion connected</title><p>Notion connected. Tally discovered {count} authorized resource(s) and verified content reads for {readable}. You may close this page and return to Tally for the import preview.</p>'
+        return HTMLResponse(body,headers=NO_STORE_HEADERS)
+    except (ValueError,ToolFailure):
+        return HTMLResponse('<!doctype html><meta charset="utf-8"><title>Notion connection failed</title><p>Notion could not be connected. Return to Tally and request a new setup link.</p>',
+                            status_code=400,headers=NO_STORE_HEADERS)
 
 # Business-routed Paystack TEST webhook. Platform feature remains default-off.
 from .paystack_webhook import router as paystack_webhook_router

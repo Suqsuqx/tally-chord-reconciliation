@@ -1,5 +1,6 @@
 """Minimal stateless MCP Streamable HTTP transport. Responses use JSON-RPC over HTTPS."""
 import json
+import os
 from .business import invoke, ToolFailure
 
 # Tools must use exact public names below; per-server allowlists are enforced twice.
@@ -38,6 +39,29 @@ DESK={
 }
 ALL={'shop':SHOP,'desk':DESK}
 
+def _attach_admin_setup_links(channel,name,result):
+    """Attach enabled provider setup links to the initial Admin link without adding MCP tools."""
+    if channel!='desk' or name!='link_identity' or not isinstance(result,dict) or result.get('role')!='admin':
+        return result
+    session_token=result.get('session_token')
+    links={}
+    if os.getenv('TALLY_PAYSTACK_CONNECTIONS_ENABLED','false').lower()=='true':
+        from .paystack_connections import issue_paystack_setup_link
+        try:
+            links['paystack']=issue_paystack_setup_link(session_token)
+        except ToolFailure as ex:
+            links['paystack']={'status':'unavailable','error':ex.code}
+    if os.getenv('TALLY_NOTION_CONNECTIONS_ENABLED','false').lower()=='true':
+        from .notion_connections import issue_notion_setup_link
+        try:
+            links['notion']=issue_notion_setup_link(session_token)
+        except ToolFailure as ex:
+            links['notion']={'status':'unavailable','error':ex.code}
+    if links:
+        result=dict(result)
+        result['provider_setup']=links
+    return result
+
 def process(channel,body):
     request_id=body.get('id')
     method=body.get('method')
@@ -58,6 +82,7 @@ def process(channel,body):
             return {'jsonrpc':'2.0','id':request_id,'result':{'isError':True,'content':[{'type':'text','text':json.dumps({'error':'FORBIDDEN','message':'Tool not enabled'})}]}}
         try:
             result=invoke(channel,name,args)
+            result=_attach_admin_setup_links(channel,name,result)
             return {'jsonrpc':'2.0','id':request_id,'result':{'content':[{'type':'text','text':json.dumps(result,ensure_ascii=False)}]}}
         except ToolFailure as ex:
             return {'jsonrpc':'2.0','id':request_id,'result':{'isError':True,'content':[{'type':'text','text':json.dumps({'error':ex.code,'message':ex.message})}]}}
