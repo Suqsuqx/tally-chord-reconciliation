@@ -1,0 +1,11 @@
+category,question,answer,visibility
+Products,What do you sell?,"Chocolate cupcakes, vanilla cupcakes and brownie boxes. Ask us to confirm current availability.",public
+Stock,Can I order vanilla cupcakes?,Vanilla cupcakes are currently listed as out of stock. Please check with us for updates.,public
+Ordering,How do I place an order?,Tell us the product and quantity and whether you want pickup or delivery. We confirm total and stock before payment.,public
+Payment,How can I pay?,We send an approved Paystack checkout link after confirming the order.,public
+Payment,I have paid but there is no confirmation.,Please send your order reference so the team can check the transaction.,public
+Delivery,Do you deliver?,We can arrange local delivery within supported Lagos areas. Charges and timing are confirmed for each order.,public
+Pickup,Can I pick up my order?,Yes by arrangement. Pickup location and timing are shared after order confirmation.,public
+Changes,Can I change or cancel an order?,Contact us as soon as possible. Changes depend on whether preparation has started.,public
+Complaints,What if an item is missing or damaged?,Contact the store within 24 hours of delivery with the order reference and a description or photo. We will review the issue and offer a suitable resolution.,public
+Privacy,Can someone else check my order?,Order details are shared with the customer who placed the order or authorized store staff.,public
