@@ -67,6 +67,26 @@ CREATE TABLE IF NOT EXISTS audit (
  id TEXT PRIMARY KEY, business_id TEXT NOT NULL, actor_id TEXT NOT NULL,
  action TEXT NOT NULL, target_id TEXT, detail TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS provider_setup_sessions (
+ token_hash TEXT PRIMARY KEY, business_id TEXT NOT NULL, actor_id TEXT NOT NULL,
+ provider TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT
+);
+CREATE TABLE IF NOT EXISTS provider_connections (
+ id TEXT PRIMARY KEY, business_id TEXT NOT NULL, provider TEXT NOT NULL,
+ environment TEXT NOT NULL, credentials_ciphertext TEXT NOT NULL,
+ key_version TEXT NOT NULL, permissions_json TEXT NOT NULL,
+ provider_account_ref TEXT, status TEXT NOT NULL,
+ verified_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ revoked_at TEXT,
+ UNIQUE(business_id,provider,environment)
+);
+CREATE TABLE IF NOT EXISTS payment_provider_references (
+ provider TEXT NOT NULL, environment TEXT NOT NULL, business_id TEXT NOT NULL,
+ connection_id TEXT NOT NULL, order_id TEXT NOT NULL, provider_reference TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ PRIMARY KEY(provider,environment,connection_id,provider_reference),
+ UNIQUE(provider,environment,connection_id,order_id)
+);
 """
 
 def db_path():

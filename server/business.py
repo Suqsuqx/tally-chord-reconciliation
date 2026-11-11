@@ -172,7 +172,7 @@ def record_payment_claim(session_token,order_id,note='Customer reports transfer'
         audit(c,a,'payment.claimed',order_id)
         return {'claim_id':cid,'order_id':order_id,'status':o['status'],'verified':False}
 
-def ingest_verified_payment(event):
+def ingest_verified_payment(event,business_id=BUSINESS_ID):
     require(event.get('event_status')=='success','INVALID_PAYMENT','Only successful provider events may settle orders')
     require(isinstance(event.get('event_id'),str) and isinstance(event.get('reference'),str),'INVALID_INPUT','Missing event id or reference')
     require(isinstance(event.get('amount_minor'),int) and event['amount_minor']>0,'INVALID_INPUT','Invalid amount')
@@ -182,7 +182,7 @@ def ingest_verified_payment(event):
         if prior:
             require(prior['reference']==event['reference'] and prior['amount_minor']==event['amount_minor'] and prior['currency']==event['currency'],'EVENT_ID_CONFLICT','The event ID was already used for different payment details')
             return {'event_id':event['event_id'],'match_status':prior['match_status'],'duplicate':True}
-        o=c.execute('SELECT * FROM orders WHERE id=? AND business_id=?',(event['reference'],BUSINESS_ID)).fetchone()
+        o=c.execute('SELECT * FROM orders WHERE id=? AND business_id=?',(event['reference'],business_id)).fetchone()
         if o is None:status='unmatched_reference';order_id=None
         elif o['total_minor']!=event['amount_minor']:status='amount_mismatch';order_id=o['id']
         elif o['currency']!=event['currency']:status='currency_mismatch';order_id=o['id']
@@ -190,9 +190,9 @@ def ingest_verified_payment(event):
         else:
             status='matched';order_id=o['id']
             c.execute('UPDATE orders SET status=?,updated_at=? WHERE id=?',('confirmed',now(),o['id']))
-        c.execute('INSERT INTO payment_events VALUES(?,?,?,?,?,?,?,?,?)',(event['event_id'],BUSINESS_ID,event['reference'],
+        c.execute('INSERT INTO payment_events VALUES(?,?,?,?,?,?,?,?,?)',(event['event_id'],business_id,event['reference'],
                          event['amount_minor'],event['currency'],event['event_status'],status,order_id,now()))
-        a={'business_id':BUSINESS_ID,'id':'sandbox-payment-provider'}
+        a={'business_id':business_id,'id':'sandbox-payment-provider'}
         audit(c,a,'payment.event_recorded',order_id,{'event_id':event['event_id'],'match_status':status})
         return {'event_id':event['event_id'],'order_id':order_id,'match_status':status,'duplicate':False}
 

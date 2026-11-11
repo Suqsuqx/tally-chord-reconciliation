@@ -7,11 +7,12 @@ import logging
 import secrets
 from datetime import datetime,timezone
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from .db import init_db
 from contextlib import asynccontextmanager
 from .business import seed, ingest_verified_payment, ToolFailure
 from .mcp import process
+from .paystack_connections import complete_paystack_setup
 
 logger=logging.getLogger('uvicorn.error')
 
@@ -115,6 +116,37 @@ async def provider_event(request:Request):
     except (json.JSONDecodeError,ToolFailure) as ex:
         return JSONResponse({'error':getattr(ex,'code','INVALID_JSON'),'message':str(ex)},status_code=400)
 
-# Opt-in Paystack test webhook; disabled unless credentials and tenant map are configured.
+PAYSTACK_SETUP_HTML="""<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connect Paystack to Tally</title>
+<style>body{font:16px system-ui;max-width:34rem;margin:3rem auto;padding:0 1rem}label{display:block;margin:1rem 0}input{width:100%;padding:.7rem}button{padding:.8rem 1rem}</style>
+<h1>Connect Paystack TEST</h1><p>Enter credentials from your Paystack dashboard. They are sent directly to Tally and are never placed in chat.</p>
+<form id="setup"><label>Restricted TEST key<input id="key" type="password" autocomplete="off" required></label>
+<label>Webhook signing secret<input id="secret" type="password" autocomplete="off" required></label>
+<button>Connect</button></form><p id="result" role="status"></p>
+<script>const token=new URLSearchParams(location.hash.slice(1)).get('token')||'';history.replaceState(null,'',location.pathname);
+document.querySelector('#setup').addEventListener('submit',async e=>{e.preventDefault();const result=document.querySelector('#result');result.textContent='Connecting…';
+const response=await fetch('/integrations/paystack/connect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({setup_token:token,restricted_key:document.querySelector('#key').value,webhook_secret:document.querySelector('#secret').value})});
+const body=await response.json();document.querySelector('#key').value='';document.querySelector('#secret').value='';result.textContent=response.ok?'Paystack TEST connected. You may close this page.':(body.message||'Connection failed. Request a new setup link.');});</script>"""
+
+@app.get('/integrations/paystack/setup')
+async def paystack_setup_page():
+    headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer',
+             'Content-Security-Policy':"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}
+    return HTMLResponse(PAYSTACK_SETUP_HTML,headers=headers)
+
+@app.post('/integrations/paystack/connect')
+async def paystack_connect(request:Request):
+    try:
+        raw=await request.body()
+        if not raw or len(raw)>16*1024:raise ValueError('Invalid setup request')
+        data=json.loads(raw)
+        if not isinstance(data,dict):raise ValueError('Invalid setup request')
+        result=await complete_paystack_setup(data.get('setup_token'),data.get('restricted_key'),data.get('webhook_secret'))
+        return JSONResponse(result)
+    except (json.JSONDecodeError,ValueError,ToolFailure):
+        return JSONResponse({'error':'CONNECTION_FAILED','message':'Connection failed. Request a new setup link.'},status_code=400)
+
+# Business-routed Paystack TEST webhook. Platform feature remains default-off.
 from .paystack_webhook import router as paystack_webhook_router
 app.include_router(paystack_webhook_router)
