@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 from server.app import app
 from server.business import ToolFailure, issue_link_code, link_identity, seed, upsert_product
 from server.db import tx
-from server.notion_connections import (cancel_notion_oauth, complete_notion_oauth, issue_notion_setup_link,
+from server.notion_connections import (cancel_notion_oauth, complete_notion_oauth, discover_authorized_resources,
+    issue_notion_setup_link,
     initialize_notion_workspace_sync, load_notion_connection_for_business, preview_notion_resource,
     refresh_notion_connection, start_notion_oauth, sync_business_snapshot, sync_product_snapshot)
 from server.mcp import process
@@ -168,8 +169,6 @@ def test_page_preview_is_bounded_and_treats_content_as_untrusted_data():
 
     async def requester(method, path, body):
         calls.append((method, path, body))
-        if path == "/search":
-            return {"results": [page], "has_more": False}
         if path == "/pages/page-asyan-profile":
             return page
         if path.startswith("/blocks/page-asyan-profile/children"):
@@ -194,13 +193,19 @@ def test_page_preview_is_bounded_and_treats_content_as_untrusted_data():
 
 
 def test_data_source_preview_extracts_only_bounded_supported_properties():
-    connect_notion()
+    async def catalogue_discovery(_access_token):
+        return {"resources": [{"id": "data-source-catalogue", "type": "data_source",
+                                "title": "Catalogue"}], "truncated": False}
+
+    _token, state = oauth_state()
+    asyncio.run(complete_notion_oauth(
+        "catalogue-authorization", state, exchanger=fake_exchange,
+        discoverer=catalogue_discovery
+    ))
     source = {"object": "data_source", "id": "data-source-catalogue",
               "title": [{"plain_text": "Catalogue"}]}
 
     async def requester(_method, path, _body):
-        if path == "/search":
-            return {"results": [source], "has_more": False}
         if path == "/data_sources/data-source-catalogue/query":
             return {"results": [{
                 "id": "catalogue-row-one",
@@ -217,6 +222,37 @@ def test_data_source_preview_extracts_only_bounded_supported_properties():
     ))
     assert result["rows"][0]["properties"] == {"Product": "Chocolate cupcake", "Price": 2500}
     assert "Hidden relation" not in result["rows"][0]["properties"]
+
+
+def test_discovery_includes_readable_direct_child_pages_and_data_sources():
+    async def requester(method, path, body):
+        if path == "/search":
+            return {"results": [{"object": "page", "id": "root-page", "properties": {
+                "Name": {"type": "title", "title": [{"plain_text": "ASYAN SHOP"}]}
+            }}], "has_more": False}
+        if path == "/blocks/root-page/children?page_size=50":
+            return {"results": [
+                {"id": "profile-page", "type": "child_page",
+                 "child_page": {"title": "Business Profile"}},
+                {"id": "catalogue-database", "type": "child_database",
+                 "child_database": {"title": "Catalogue"}},
+            ], "has_more": False}
+        if path == "/databases/catalogue-database":
+            return {"data_sources": [{"id": "catalogue-source", "name": "Catalogue"}]}
+        if path in ("/blocks/root-page/children?page_size=1",
+                    "/blocks/profile-page/children?page_size=1"):
+            return {"results": [], "has_more": False}
+        if path == "/data_sources/catalogue-source/query":
+            return {"results": [], "has_more": False}
+        raise AssertionError((method, path, body))
+
+    result = asyncio.run(discover_authorized_resources("token", requester=requester))
+    assert [(item["type"], item["title"]) for item in result["resources"]] == [
+        ("page", "ASYAN SHOP"),
+        ("page", "Business Profile"),
+        ("data_source", "Catalogue"),
+    ]
+    assert all(item["read_status"] == "readable" for item in result["resources"])
 
 
 def test_refresh_rotates_both_encrypted_tokens_without_plaintext_storage():

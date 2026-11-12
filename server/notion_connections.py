@@ -177,44 +177,75 @@ def _resource_summary(item):
 
 
 async def discover_authorized_resources(access_token, requester=None):
-    """List authorized resources and probe a bounded subset for real read access."""
-    if requester is not None:
-        payload = await requester("POST", "/search", {"page_size": MAX_DISCOVERY_ITEMS})
-    else:
+    """List authorized roots plus readable direct children, then probe bounded access."""
+    async def request(method, path, body=None):
+        if requester is not None:
+            return await requester(method, path, body)
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                NOTION_API_ROOT + "/search",
-                headers=_headers(access_token),
-                json={"page_size": MAX_DISCOVERY_ITEMS},
+            response = await client.request(
+                method, NOTION_API_ROOT + path, headers=_headers(access_token), json=body
             )
         if response.status_code != 200:
-            raise ValueError("Notion authorized content could not be read")
-        payload = response.json()
+            return None
+        return response.json()
+
+    payload = await request("POST", "/search", {"page_size": MAX_DISCOVERY_ITEMS})
+    if payload is None:
+        raise ValueError("Notion authorized content could not be read")
     results = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(results, list):
         raise ValueError("Notion returned an invalid content response")
     summaries = [_resource_summary(item) for item in results[:MAX_DISCOVERY_ITEMS]
                  if isinstance(item, dict) and item.get("object") in ("page", "data_source")]
-    if requester is None:
-        by_id = {item.get("id"): item for item in results if isinstance(item, dict)}
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            for summary in summaries[:5]:
-                item = by_id.get(summary["id"], {})
-                try:
-                    if item.get("object") == "page":
-                        response = await client.get(
-                            NOTION_API_ROOT + f"/blocks/{summary['id']}/children",
-                            headers=_headers(access_token), params={"page_size": 1},
-                        )
-                    else:
-                        response = await client.post(
-                            NOTION_API_ROOT + f"/data_sources/{summary['id']}/query",
-                            headers=_headers(access_token), json={"page_size": 1},
-                        )
-                    summary["read_status"] = "readable" if response.status_code == 200 else "unreadable"
-                except httpx.HTTPError:
-                    summary["read_status"] = "unreadable"
-    return {"resources": summaries, "truncated": bool(payload.get("has_more"))}
+    known = {summary["id"] for summary in summaries}
+    truncated = bool(payload.get("has_more"))
+
+    # Notion search may return only the OAuth-selected root even when its direct
+    # child pages and databases inherit access. Discover one bounded child level
+    # so a merchant can share a single business workspace root.
+    for root in [item for item in summaries if item["type"] == "page"][:10]:
+        blocks = await request("GET", f"/blocks/{root['id']}/children?page_size={MAX_DISCOVERY_ITEMS}")
+        if not isinstance(blocks, dict) or not isinstance(blocks.get("results"), list):
+            continue
+        truncated = truncated or bool(blocks.get("has_more"))
+        for block in blocks["results"][:MAX_DISCOVERY_ITEMS]:
+            if not isinstance(block, dict) or len(summaries) >= MAX_DISCOVERY_ITEMS:
+                continue
+            kind = block.get("type")
+            child_id = str(block.get("id", ""))[:80]
+            if kind == "child_page" and child_id and child_id not in known:
+                title = str((block.get("child_page") or {}).get("title") or "Untitled page")[:300]
+                summaries.append({"id": child_id, "type": "page", "title": title,
+                                  "last_edited_time": None})
+                known.add(child_id)
+            elif kind == "child_database" and child_id:
+                database = await request("GET", f"/databases/{child_id}")
+                data_sources = database.get("data_sources") if isinstance(database, dict) else None
+                if not isinstance(data_sources, list):
+                    continue
+                for source in data_sources:
+                    if not isinstance(source, dict) or len(summaries) >= MAX_DISCOVERY_ITEMS:
+                        continue
+                    source_id = str(source.get("id", ""))[:80]
+                    if not source_id or source_id in known:
+                        continue
+                    title = str(source.get("name") or
+                                (block.get("child_database") or {}).get("title") or
+                                "Untitled data source")[:300]
+                    summaries.append({"id": source_id, "type": "data_source", "title": title,
+                                      "last_edited_time": None})
+                    known.add(source_id)
+
+    for summary in summaries[:5]:
+        try:
+            if summary["type"] == "page":
+                probe = await request("GET", f"/blocks/{summary['id']}/children?page_size=1")
+            else:
+                probe = await request("POST", f"/data_sources/{summary['id']}/query", {"page_size": 1})
+            summary["read_status"] = "readable" if isinstance(probe, dict) else "unreadable"
+        except httpx.HTTPError:
+            summary["read_status"] = "unreadable"
+    return {"resources": summaries, "truncated": truncated}
 
 
 async def complete_notion_oauth(code, state, exchanger=None, discoverer=None):
@@ -615,6 +646,11 @@ async def preview_notion_resource(session_token, resource_id, requester=None):
             "INVALID_INPUT", "Select a valid Notion resource")
     with tx() as conn:
         actor = actor_from_token(conn, session_token, "desk")
+        authorized = conn.execute("""SELECT resource_id,resource_type,title,metadata_json
+                                  FROM provider_resources WHERE business_id=? AND provider='notion'
+                                  AND resource_id=?""", (actor["business_id"], resource_id)).fetchone()
+    require(authorized is not None, "NOT_FOUND",
+            "Resource is not in this business's authorized Notion content")
     connection = load_notion_connection_for_business(actor["business_id"])
     require(connection is not None, "NOT_CONNECTED", "Connect Notion first")
     access_token = connection["credentials"]["access_token"]
@@ -635,19 +671,15 @@ async def preview_notion_resource(session_token, resource_id, requester=None):
             raise ValueError("Notion resource could not be read")
         return response.json()
 
-    search = await request("POST", "/search", {"page_size": MAX_DISCOVERY_ITEMS})
-    resources = search.get("results") if isinstance(search, dict) else None
-    require(isinstance(resources, list), "PROVIDER_REJECTED", "Notion returned an invalid content response")
-    selected = next((item for item in resources if isinstance(item, dict) and item.get("id") == resource_id
-                     and item.get("object") in ("page", "data_source")), None)
-    require(selected is not None, "NOT_FOUND", "Resource is not in this business's authorized Notion content")
+    source = {"id": authorized["resource_id"], "type": authorized["resource_type"],
+              "title": authorized["title"], "workspace": "authorized OAuth workspace"}
 
-    if selected["object"] == "data_source":
+    if authorized["resource_type"] == "data_source":
         payload = await request("POST", f"/data_sources/{resource_id}/query", {"page_size": MAX_PREVIEW_ROWS})
         rows = payload.get("results") if isinstance(payload, dict) else None
         require(isinstance(rows, list), "PROVIDER_REJECTED", "Notion returned an invalid data source response")
         return {
-            "source": {**_resource_summary(selected), "workspace": "authorized OAuth workspace"},
+            "source": source,
             "rows": [{"id": str(row.get("id", ""))[:80], "properties": _page_properties(row)}
                      for row in rows[:MAX_PREVIEW_ROWS] if isinstance(row, dict)],
             "truncated": bool(payload.get("has_more")),
@@ -659,7 +691,7 @@ async def preview_notion_resource(session_token, resource_id, requester=None):
     block_items = blocks.get("results") if isinstance(blocks, dict) else None
     require(isinstance(block_items, list), "PROVIDER_REJECTED", "Notion returned an invalid page response")
     return {
-        "source": {**_resource_summary(selected), "workspace": "authorized OAuth workspace"},
+        "source": source,
         "properties": _page_properties(page),
         "content": [value for value in (_block_text(block) for block in block_items[:MAX_PREVIEW_BLOCKS]) if value],
         "truncated": bool(blocks.get("has_more")),
@@ -674,6 +706,11 @@ def preview_notion_resource_sync(session_token, resource_id, requester=None):
             "INVALID_INPUT", "Select a valid Notion resource")
     with tx() as conn:
         actor = actor_from_token(conn, session_token, "desk")
+        authorized = conn.execute("""SELECT resource_id,resource_type,title,metadata_json
+                                  FROM provider_resources WHERE business_id=? AND provider='notion'
+                                  AND resource_id=?""", (actor["business_id"], resource_id)).fetchone()
+    require(authorized is not None, "NOT_FOUND",
+            "Resource is not in this business's authorized Notion content")
     connection = load_notion_connection_for_business(actor["business_id"])
     require(connection is not None, "NOT_CONNECTED", "Connect Notion first")
     access_token = connection["credentials"]["access_token"]
@@ -688,17 +725,13 @@ def preview_notion_resource_sync(session_token, resource_id, requester=None):
             raise ValueError("Notion resource could not be read")
         return response.json()
 
-    search = request("POST", "/search", {"page_size": MAX_DISCOVERY_ITEMS})
-    resources = search.get("results") if isinstance(search, dict) else None
-    require(isinstance(resources, list), "PROVIDER_REJECTED", "Notion returned invalid content")
-    selected = next((item for item in resources if isinstance(item, dict) and item.get("id") == resource_id
-                     and item.get("object") in ("page", "data_source")), None)
-    require(selected is not None, "NOT_FOUND", "Resource is not in this business's authorized Notion content")
-    if selected["object"] == "data_source":
+    source = {"id": authorized["resource_id"], "type": authorized["resource_type"],
+              "title": authorized["title"], "workspace": "authorized OAuth workspace"}
+    if authorized["resource_type"] == "data_source":
         payload = request("POST", f"/data_sources/{resource_id}/query", {"page_size": MAX_PREVIEW_ROWS})
         rows = payload.get("results") if isinstance(payload, dict) else None
         require(isinstance(rows, list), "PROVIDER_REJECTED", "Notion returned invalid data source content")
-        return {"source": {**_resource_summary(selected), "workspace": "authorized OAuth workspace"},
+        return {"source": source,
                 "rows": [{"id": str(row.get("id", ""))[:80], "properties": _page_properties(row)}
                          for row in rows[:MAX_PREVIEW_ROWS] if isinstance(row, dict)],
                 "truncated": bool(payload.get("has_more")),
@@ -707,7 +740,7 @@ def preview_notion_resource_sync(session_token, resource_id, requester=None):
     blocks = request("GET", f"/blocks/{resource_id}/children?page_size={MAX_PREVIEW_BLOCKS}")
     block_items = blocks.get("results") if isinstance(blocks, dict) else None
     require(isinstance(block_items, list), "PROVIDER_REJECTED", "Notion returned invalid page content")
-    return {"source": {**_resource_summary(selected), "workspace": "authorized OAuth workspace"},
+    return {"source": source,
             "properties": _page_properties(page),
             "content": [value for value in (_block_text(block) for block in block_items[:MAX_PREVIEW_BLOCKS]) if value],
             "truncated": bool(blocks.get("has_more")),
