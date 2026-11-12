@@ -79,3 +79,5 @@ The non-Git live checkout was updated without copying `.env`, `.venv`, caches or
 - deployed files match the committed branch source, excluding private/runtime paths.
 
 No provider feature was enabled, no merchant credential was installed, no Notion OAuth grant occurred, no Paystack API request or payment was made, and no Chord/simulator credit was used for this deployment verification. Live acceptance remains blocked on Tally Notion app registration/private platform configuration and the owner's secure off-chat provider actions.
+
+On 12 November, the platform-only machine configuration was advanced without enabling providers: a new 32-byte credential-encryption key and version, explicit false Paystack/Notion flags, exact HTTPS Notion callback and API version were installed in the private mode-`0600` environment. The key length and redacted preflight passed, a post-configuration private environment backup was saved, the service restarted active, public health stayed OK and Notion setup still failed closed. Tally's Notion OAuth client ID/secret are still absent; merchant Paystack keys and webhook secrets remain absent by design.
