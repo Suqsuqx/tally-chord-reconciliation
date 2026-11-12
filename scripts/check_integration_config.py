@@ -13,12 +13,20 @@ def main():
         for name in ("TALLY_PAYSTACK_CONNECTIONS_ENABLED", "TALLY_NOTION_CONNECTIONS_ENABLED")
     )
     if provider_connections_enabled:
+        public_base_url = env.get("TALLY_PUBLIC_BASE_URL", "")
+        parsed_public_base_url = urlparse(public_base_url)
         encoded = env.get("TALLY_CREDENTIAL_ENCRYPTION_KEY", "")
         try:
             valid_encryption_key = len(base64.urlsafe_b64decode(encoded.encode())) == 32
         except (ValueError,TypeError):
             valid_encryption_key = False
         checks.extend([
+            (
+                "Public setup URL HTTPS",
+                parsed_public_base_url.scheme == "https"
+                and bool(parsed_public_base_url.netloc)
+                and not parsed_public_base_url.path.rstrip("/"),
+            ),
             ("Merchant credential encryption key", valid_encryption_key),
             ("Credential encryption key version", bool(env.get("TALLY_CREDENTIAL_ENCRYPTION_KEY_VERSION", ""))),
         ])
