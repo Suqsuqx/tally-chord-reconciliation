@@ -1,10 +1,10 @@
 # Merchant provider connections — activation and acceptance gates
 
-This branch implements default-off connection flows for merchant-owned Paystack TEST accounts and merchant-selected Notion content. It does not contain merchant credentials and it does not prove that either provider is live.
+This branch implements merchant-owned Paystack TEST and Notion OAuth connection flows. The public repository contains no merchant credentials, and enabled setup routes do not prove that either provider has been connected or accepted live.
 
 ## Deployment record
 
-The code was deployed to the existing sandbox with both provider features default-off at 16:24 WAT on 11 November 2026 and reverified on 12 November. The source and deployed copy passed 33 tests; local and public health returned sandbox `status: ok`; SQLite integrity was `ok`; the four additive provider tables exist; provider connection and OAuth-state counts were zero; local authenticated MCP discovery remained exactly 7 Shop / 11 Desk tools; and provider setup POSTs failed closed while configuration was absent. A private source/environment snapshot and consistent SQLite backup were created before deployment. On 12 November, a generated 32-byte platform encryption key/version, explicit false feature flags, exact Notion callback and API version were installed in the private mode-0600 environment and backed up without printing values; restart/health/fail-closed checks passed. Tally's Notion client ID/secret remain unconfigured. This is deployment evidence only, not a Paystack or Notion acceptance pass.
+The default-off provider core was deployed on 11 November. On 12 November, the merchant-onboarding release `cd649bf` was deployed after a private source/environment snapshot and consistent SQLite backup. Source and deployed copies passed 37 tests; the additive migration preserved every core-table row count; SQLite integrity remained `ok`; local/public health returned sandbox `status: ok`; and authenticated discovery remained exactly 7 Shop / 11 Desk tools. Tally's private Notion client configuration and both provider feature flags are now present/enabled. Provider connection count remains zero: no merchant Paystack key, webhook secret or Notion OAuth token has been submitted, and no genuine provider acceptance call is claimed.
 
 ## Security model
 
