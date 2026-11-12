@@ -166,7 +166,8 @@ NOTION_SETUP_HTML="""<!doctype html>
 <p>Nothing is imported or written until you approve it in Tally.</p>
 <button id="connect">Choose pages in Notion</button><p id="result" role="status"></p>
 <script>const token=new URLSearchParams(location.hash.slice(1)).get('token')||'';history.replaceState(null,'',location.pathname);
-document.querySelector('#connect').addEventListener('click',async()=>{const result=document.querySelector('#result');result.textContent='Opening Notion…';
+const button=document.querySelector('#connect'),result=document.querySelector('#result');if(!token){button.disabled=true;result.textContent='This setup link is incomplete or expired. Request a fresh Notion link from Tally.';}
+button.addEventListener('click',async()=>{result.textContent='Opening Notion…';
 const response=await fetch('/integrations/notion/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({setup_token:token})});
 const body=await response.json();if(response.ok&&body.authorize_url){location.assign(body.authorize_url);return;}result.textContent=body.message||'Connection failed. Request a new setup link.';});</script>"""
 
@@ -185,8 +186,14 @@ async def notion_start(request:Request):
         data=json.loads(raw)
         if not isinstance(data,dict):raise ValueError('Invalid setup request')
         return JSONResponse(start_notion_oauth(data.get('setup_token')),headers={'Cache-Control':'no-store'})
-    except (json.JSONDecodeError,ValueError,ToolFailure):
-        return JSONResponse({'error':'CONNECTION_FAILED','message':'Connection failed. Request a new setup link.'},
+    except ToolFailure as exc:
+        logger.info('notion_oauth_start_failed code=%s',exc.code)
+        return JSONResponse({'error':exc.code,'message':exc.message},status_code=400,
+                            headers={'Cache-Control':'no-store'})
+    except (json.JSONDecodeError,ValueError):
+        logger.info('notion_oauth_start_failed code=INVALID_REQUEST')
+        return JSONResponse({'error':'INVALID_REQUEST',
+                             'message':'This Notion setup request is invalid. Request a fresh Notion link from Tally.'},
                             status_code=400,headers={'Cache-Control':'no-store'})
 
 @app.get('/integrations/notion/callback')

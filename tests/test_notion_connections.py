@@ -242,6 +242,18 @@ def test_notion_setup_page_has_no_store_and_strict_browser_policy():
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
     assert "Nothing is imported or written until you approve" in response.text
+    assert "This setup link is incomplete or expired" in response.text
+
+
+def test_notion_start_reports_stale_link_without_echoing_token():
+    stale_token = "stale-notion-setup-token-that-does-not-exist"
+    response = TestClient(app).post("/integrations/notion/start", json={
+        "setup_token": stale_token,
+    })
+    assert response.status_code == 400
+    assert response.json()["error"] == "INVALID_SETUP"
+    assert "invalid or expired" in response.json()["message"]
+    assert stale_token not in response.text
 
 
 def test_initial_admin_link_returns_provider_setup_links_without_expanding_desk_tools(monkeypatch):
