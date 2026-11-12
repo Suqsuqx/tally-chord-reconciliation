@@ -1,6 +1,6 @@
 # ASYAN SHOP — Codex implementation and final simulator test
 
-**Status: provider connection code implemented locally; platform registration, deployment and real acceptance pending.** No API keys, production payments or actual simulator conversations were used to construct this branch. Preserve the existing deployed Tally sandbox and do not alter unrelated VPS apps.
+**Status: provider connection code deployed default-off; platform registration, activation and real acceptance pending.** No merchant API keys, production payments or actual simulator conversations were used for this release. Preserve the existing Tally sandbox and do not alter unrelated VPS apps.
 
 ## Mission
 
@@ -14,7 +14,7 @@ Notion is independently merchant-created; do not seed or preauthorize it into Ta
 
 - Existing v1.2 backend: 7 Shop tools, 11 Desk tools, sandbox identities, order/claim/synthetic HMAC payment reconciliation, stock, fulfilment and support; a hardcoded `BUSINESS_ID = 'sandbox-cedar-bakes'` still exists in `server/business.py`.
 - New in this branch: `server/merchant_csv.py` bounded preview-only ZIP parser (no DB writes); additive business-scoped provider connection/setup/OAuth/reference tables; AES-GCM encrypted Paystack and Notion credentials; short-lived fragment-token setup pages; per-connection Paystack webhook URLs; current `Paystack-Signature` / `whsec_` verification with explicit legacy compatibility; Tally-owned Notion OAuth with one-time state, token rotation, authorized-resource discovery/read probes and bounded untrusted-data previews; `.env.example` platform-only key schema; fixtures and tests.
-- Local branch verification on 11 November 2026 passed 33 tests, but **branch CI, VPS deployment, Notion developer-portal registration, a genuine Paystack connection, transaction initialization/API verification, real Notion OAuth and simulator E2E are NOT yet verified**. No merchant credentials were installed.
+- The source and deployed copy passed 33 tests. The default-off release restarted successfully at 16:24 WAT on 11 November and was reverified on 12 November: local/public health OK, SQLite integrity OK, additive provider schema present, zero provider connections/OAuth states, exact 7 Shop / 11 Desk discovery, and both provider setup POSTs fail closed. **Notion developer-portal registration, a genuine Paystack connection, transaction initialization/API verification, real Notion OAuth and simulator E2E are NOT yet verified.** No merchant credentials were installed.
 
 ## Codex implementation order
 

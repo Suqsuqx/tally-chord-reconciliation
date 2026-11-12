@@ -64,3 +64,18 @@ Approximately ten synthetic Chord external-chat requests were sent across connec
 ## Rollback
 
 If a scope or health regression appears, disable the affected operational MCP server through Chord. Keep the native Assistant’s disabled sentinel assigned and disabled. Restore the private pre-journey SQLite backup only after stopping the service and preserving the current database; no restore was required during verification.
+
+## Provider connection release — 11–12 November 2026
+
+Commit `141907d` introduced the default-off business-scoped Paystack setup/storage core and Tally-owned Notion OAuth/read-preview core. Before deployment, the source passed 33 tests and a private rollback set was created at 15:23 UTC on 11 November: current environment, source archive and a consistent SQLite backup whose integrity check returned `ok`.
+
+The non-Git live checkout was updated without copying `.env`, `.venv`, caches or persistent data. The deployed copy passed the same 33 tests before service restart. `tally.service` restarted at 16:24 WAT with one worker. Reverification on 12 November observed:
+
+- local and public `/healthz`: `status: ok`, `environment: sandbox`;
+- additive provider tables present; SQLite integrity `ok`;
+- zero provider connection and OAuth-state records;
+- exact local authenticated discovery: 7 Shop tools and 11 Desk tools;
+- Paystack and Notion connection POSTs fail closed while provider configuration is absent;
+- deployed files match the committed branch source, excluding private/runtime paths.
+
+No provider feature was enabled, no merchant credential was installed, no Notion OAuth grant occurred, no Paystack API request or payment was made, and no Chord/simulator credit was used for this deployment verification. Live acceptance remains blocked on Tally Notion app registration/private platform configuration and the owner's secure off-chat provider actions.

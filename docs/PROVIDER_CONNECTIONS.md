@@ -2,6 +2,10 @@
 
 This branch implements default-off connection flows for merchant-owned Paystack TEST accounts and merchant-selected Notion content. It does not contain merchant credentials and it does not prove that either provider is live.
 
+## Deployment record
+
+The code was deployed to the existing sandbox with both provider features default-off at 16:24 WAT on 11 November 2026 and reverified on 12 November. The source and deployed copy passed 33 tests; local and public health returned sandbox `status: ok`; SQLite integrity was `ok`; the four additive provider tables exist; provider connection and OAuth-state counts were zero; local authenticated MCP discovery remained exactly 7 Shop / 11 Desk tools; and provider setup POSTs failed closed while configuration was absent. A private source/environment snapshot and consistent SQLite backup were created before deployment. This is deployment evidence only, not a Paystack or Notion acceptance pass.
+
 ## Security model
 
 - Only an active business Admin may receive setup links. Operators and customers are denied.

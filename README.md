@@ -13,7 +13,7 @@ This repository is an assessment sandbox, not a production payment or identity s
 - Server-side per-actor Admin/Operator/Customer rules using one-time **sandbox** identity-link codes and short-lived sessions.
 - Stock reservation, idempotent order creation, signed sandbox payment events (not customer-visible MCP), reconciliation report, merchant catch-up, low-stock alerts, order status and case-specific customer support.
 - Automated tests (`pytest`) for identity isolation, payment mismatch/idempotency, out-of-stock and fulfilment failure scenarios.
-- Default-off merchant connection scaffolds: short-lived Paystack setup and Notion OAuth links, AES-GCM encrypted per-business credentials, Notion page-picker authorization and bounded read-only previews. These branch features are not yet deployed or provider-verified.
+- Default-off merchant connection scaffolds: short-lived Paystack setup and Notion OAuth links, AES-GCM encrypted per-business credentials, Notion page-picker authorization and bounded read-only previews. This code was deployed default-off on 11 November 2026 and reverified on 12 November; neither provider has been configured or live-verified.
 
 ## Verification status — 6 November 2026
 
@@ -82,7 +82,7 @@ The script prints names, enabled state, scope checks, health and tool names; it 
 
 Sandbox only. No live merchant data, real WhatsApp numbers, production payment keys or channel-bound identity attestation. Chord API/external-chat tool calls were observed, but that does not substitute for the still-pending Channel simulator UI recording or native handoff proof. A stored support reply is not proof of customer delivery.
 
-The provider connection code is disabled unless its explicit feature flag is enabled. Merchant Paystack credentials are submitted only through the private HTTPS form and encrypted against the merchant business record; they are not global environment variables. Notion uses Tally's own OAuth client, Notion's page picker and encrypted per-business access/refresh tokens. Admin sandbox identity linking can attach setup links without changing the existing seven-Shop/eleven-Desk tool allowlists. See `docs/PROVIDER_CONNECTIONS.md` for activation gates and honest limitations.
+The provider connection code is disabled unless its explicit feature flag is enabled. Merchant Paystack credentials are submitted only through the private HTTPS form and encrypted against the merchant business record; they are not global environment variables. Notion uses Tally's own OAuth client, Notion's page picker and encrypted per-business access/refresh tokens. Admin sandbox identity linking can attach setup links without changing the existing seven-Shop/eleven-Desk tool allowlists. The current VPS has no provider connection settings and zero provider connection records. See `docs/PROVIDER_CONNECTIONS.md` for activation gates and honest limitations.
 
 ## AI usage declaration
 
