@@ -8,6 +8,18 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS businesses (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, currency TEXT NOT NULL DEFAULT 'NGN'
 );
+CREATE TABLE IF NOT EXISTS business_settings (
+ business_id TEXT PRIMARY KEY, shop_slug TEXT NOT NULL UNIQUE,
+ onboarding_status TEXT NOT NULL DEFAULT 'onboarding',
+ profile_json TEXT NOT NULL DEFAULT '{}', policies_json TEXT NOT NULL DEFAULT '[]',
+ payment_method TEXT, bank_details_json TEXT,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS channel_identities (
+ channel TEXT NOT NULL, identity_hash TEXT NOT NULL, business_id TEXT NOT NULL,
+ actor_id TEXT NOT NULL, created_at TEXT NOT NULL,
+ PRIMARY KEY(channel,identity_hash,business_id), UNIQUE(actor_id)
+);
 CREATE TABLE IF NOT EXISTS actors (
  id TEXT PRIMARY KEY, business_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('customer','staff')),
  role TEXT NOT NULL CHECK(role IN ('customer','admin','operator')), display_name TEXT NOT NULL,
@@ -87,9 +99,16 @@ CREATE TABLE IF NOT EXISTS provider_connections (
 CREATE TABLE IF NOT EXISTS payment_provider_references (
  provider TEXT NOT NULL, environment TEXT NOT NULL, business_id TEXT NOT NULL,
  connection_id TEXT NOT NULL, order_id TEXT NOT NULL, provider_reference TEXT NOT NULL,
- created_at TEXT NOT NULL,
+ created_at TEXT NOT NULL, checkout_url TEXT, access_code TEXT,
+ status TEXT NOT NULL DEFAULT 'initialized',
  PRIMARY KEY(provider,environment,connection_id,provider_reference),
  UNIQUE(provider,environment,connection_id,order_id)
+);
+CREATE TABLE IF NOT EXISTS provider_resources (
+ connection_id TEXT NOT NULL, business_id TEXT NOT NULL, provider TEXT NOT NULL,
+ resource_id TEXT NOT NULL, resource_type TEXT NOT NULL, title TEXT NOT NULL,
+ metadata_json TEXT NOT NULL DEFAULT '{}', discovered_at TEXT NOT NULL,
+ PRIMARY KEY(connection_id,resource_id)
 );
 """
 
@@ -102,6 +121,16 @@ def init_db():
     with sqlite3.connect(path) as conn:
         conn.execute('PRAGMA journal_mode=WAL')
         conn.executescript(SCHEMA)
+        # Additive compatibility for databases created before provider checkout
+        # metadata was introduced. Never rebuild or discard an existing table.
+        existing = {row[1] for row in conn.execute('PRAGMA table_info(payment_provider_references)')}
+        for name, declaration in (
+            ('checkout_url', 'TEXT'),
+            ('access_code', 'TEXT'),
+            ('status', "TEXT NOT NULL DEFAULT 'initialized'"),
+        ):
+            if name not in existing:
+                conn.execute(f'ALTER TABLE payment_provider_references ADD COLUMN {name} {declaration}')
 
 @contextmanager
 def tx():

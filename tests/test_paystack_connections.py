@@ -23,7 +23,7 @@ def setup(tmp_path, monkeypatch):
 
 
 async def fake_verify(_key):
-    return {"permissions": ["transaction:read"], "provider_account_ref": "verified-test-account"}
+    return {"permissions": ["transactions:write"], "provider_account_ref": "verified-test-account"}
 
 
 def setup_token(actor_id):
@@ -74,7 +74,7 @@ def test_invalid_setup_token_is_rejected_before_provider_request():
     async def should_not_run(_key):
         nonlocal called
         called = True
-        return {"permissions": ["transaction:read"]}
+        return {"permissions": ["transactions:write"]}
 
     with pytest.raises(ToolFailure):
         asyncio.run(complete_paystack_setup(

@@ -6,11 +6,11 @@ Each tool is exposed through **one** of two authenticated public HTTPS endpoints
 
 | Tool | Private? | Outcome |
 |---|---:|---|
-| `link_identity` | Redeem sandbox code | Short-lived test customer session. Never echo token. |
-| `get_catalog` | Public | Current product name, price in kobo, available quantity. |
-| `create_order` | Customer session | Recheck stock, reserve units, persist order and total, idempotent request. |
+| `link_identity` | Shop context | Route an unverified simulator sender to an active merchant slug (legacy codes remain for regression tests). |
+| `get_catalog` | Public/session | Tenant-scoped approved profile/policies, products, prices and availability. |
+| `create_order` | Customer session | Recheck stock, reserve units and return manual-bank instructions or initialize Paystack TEST checkout idempotently. |
 | `get_my_order` | Customer session | Customer-owned order and status only. |
-| `record_payment_claim` | Customer session | Unverified claim; never settles an order. |
+| `record_payment_claim` | Customer session | Record the claim, then independently verify a mapped Paystack transaction; otherwise remain unverified. |
 | `create_support_case` | Customer session | Persist inquiry/complaint with owner and optional own order. |
 | `get_my_support_case` | Customer session | Read own case and recorded replies. |
 
@@ -18,11 +18,11 @@ Each tool is exposed through **one** of two authenticated public HTTPS endpoints
 
 | Tool | Permission | Outcome |
 |---|---|---|
-| `link_identity` | Redeem sandbox staff code | Short-lived Admin or Operator test session. |
-| `get_catalog` | Both | Merchant catalogue and available quantity. |
+| `link_identity` | Sandbox sender/business context | Register/resume merchant Admin, save approved onboarding data/payment choice and activate only when ready. |
+| `get_catalog` | Both | Merchant catalogue/onboarding state, authorized Notion resources and optional bounded preview. |
 | `upsert_product` | Admin | Add or change price, physical stock and threshold. |
 | `get_order_queue` | Both | All current orders for sandbox business. |
-| `update_order_status` | Both | Valid paid-order fulfilment transition. |
+| `update_order_status` | Both/Admin confirmation | Paid fulfilment transitions; Admin-only audited manual-bank confirmation from awaiting payment. |
 | `get_reconciliation_report` | Both | Verified matched payments, exceptions, unpaid orders and claims. |
 | `get_merchant_catchup` | Both | Time-scoped activity + report + stock and support backlog. |
 | `get_inventory_alerts` | Both | Low/out of stock alerts, accounting for reserved stock. |
@@ -30,7 +30,7 @@ Each tool is exposed through **one** of two authenticated public HTTPS endpoints
 | `list_support_cases` | Both | Support queue. |
 | `reply_support_case` | Both | Case-scoped recorded merchant response, delivery not presumed. |
 
-When a sandbox Admin successfully uses the existing `link_identity` tool and a provider connection feature is enabled, that same result includes short-lived private setup links for configured providers. Operators never receive setup links. This preserves the exact eleven-tool Desk allowlist; links authorize setup only after the backend has already validated the Admin session.
+When a sandbox Admin registers or resumes through `link_identity` and a provider feature is enabled, the result includes short-lived private setup links. Operators never receive them. The same seven/eleven tool counts are preserved.
 
 ## Provider-only, not an MCP tool
 
@@ -38,7 +38,7 @@ When a sandbox Admin successfully uses the existing `link_identity` tool and a p
 
 ## Identity gate to verify on Chord
 
-The backend now distinguishes individual test Admin/Operator/Customer sessions. **Chord's documented static MCP bearer credential alone does not identify a WhatsApp sender.** The sandbox uses one-time actor codes and short-lived tool session tokens. Before serving real customers, verify whether the connected channel can supply a signed identity claim to the MCP server; otherwise build a secure out-of-band channel binding. Do not interpret a demonstration code as real-world phone verification.
+The sandbox accepts an explicit simulator sender identifier only to demonstrate routing and repeats `identity_assurance=unverified_simulator`. It is not authentication. The live WhatsApp adapter must derive the sender number from the authenticated provider envelope and inject it server-side; it must never authorize a phone number typed in message text.
 
 ## MCP transport note
 

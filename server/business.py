@@ -2,6 +2,7 @@
 import hashlib
 import os
 import json
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -34,6 +35,12 @@ def require(cond, code, message):
 def seed():
     with tx() as c:
         c.execute('INSERT OR IGNORE INTO businesses VALUES(?,?,?)', (BUSINESS_ID, 'Cedar Bakes (sandbox)', 'NGN'))
+        timestamp=now()
+        c.execute('''INSERT OR IGNORE INTO business_settings
+                     (business_id,shop_slug,onboarding_status,profile_json,policies_json,payment_method,
+                      bank_details_json,created_at,updated_at)
+                     VALUES(?,?,?,'{}','[]',NULL,NULL,?,?)''',
+                  (BUSINESS_ID,'cedar-bakes','active',timestamp,timestamp))
         for a in [
             ('cust-ada','customer','customer','Ada (test customer)'),
             ('cust-bola','customer','customer','Bola (test customer)'),
@@ -63,8 +70,154 @@ def issue_link_code(actor_id, ttl_minutes=10):
         c.execute('INSERT INTO access_codes VALUES(?,?,?,NULL)',(digest(code),actor_id,exp))
         return code
 
-def link_identity(code, channel):
+def _slug(value):
+    value=re.sub(r'[^a-z0-9]+','-',str(value or '').strip().lower()).strip('-')
+    require(2<=len(value)<=60,'INVALID_INPUT','Provide a valid business shop name or slug')
+    return value
+
+def _sender_hash(sender_identity):
+    require(isinstance(sender_identity,str) and 3<=len(sender_identity.strip())<=200,
+            'INVALID_INPUT','A simulator sender identity is required')
+    normalized=' '.join(sender_identity.strip().lower().split())
+    return digest('tally|sandbox-sender|'+normalized)
+
+def _issue_session(c,actor):
+    session=secrets.token_urlsafe(32)
+    expires=(datetime.now(timezone.utc)+timedelta(hours=2)).isoformat()
+    c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(digest(session),actor['id'],expires,now()))
+    business=c.execute('SELECT name FROM businesses WHERE id=?',(actor['business_id'],)).fetchone()
+    settings=c.execute('SELECT shop_slug,onboarding_status FROM business_settings WHERE business_id=?',
+                       (actor['business_id'],)).fetchone()
+    return {'session_token':session,'role':actor['role'],'business_id':actor['business_id'],
+            'business_name':business['name'],'shop_slug':settings['shop_slug'] if settings else None,
+            'shop_status':settings['onboarding_status'] if settings else 'onboarding',
+            'expires_at':expires,
+            'identity_assurance':'unverified_simulator' if actor['id'].startswith(('own-','cus-')) else 'sandbox_code',
+            'note':'Sandbox routing only. The live product must derive identity from the authenticated WhatsApp sender.'}
+
+def _validate_profile(profile):
+    if profile is None:return None
+    require(isinstance(profile,dict) and len(profile)<=30,'INVALID_INPUT','Business profile must be an object')
+    clean={}
+    for key,value in profile.items():
+        require(isinstance(key,str) and 1<=len(key)<=80 and isinstance(value,(str,int,float,bool)),
+                'INVALID_INPUT','Business profile contains an unsupported value')
+        clean[key.strip()]=str(value)[:1000] if not isinstance(value,bool) else value
+    return clean
+
+def _validate_policies(policies):
+    if policies is None:return None
+    require(isinstance(policies,list) and len(policies)<=50,'INVALID_INPUT','Policies must be a list')
+    clean=[]
+    for item in policies:
+        require(isinstance(item,dict) and isinstance(item.get('question'),str) and
+                isinstance(item.get('answer'),str),'INVALID_INPUT','Each policy needs question and answer')
+        clean.append({'question':item['question'].strip()[:300],'answer':item['answer'].strip()[:2000]})
+    return clean
+
+def _configure_business(c,actor,profile=None,policies=None,manual_bank=None,activate_shop=False):
+    require(actor['role']=='admin','FORBIDDEN','Only an admin may change onboarding settings')
+    settings=c.execute('SELECT * FROM business_settings WHERE business_id=?',(actor['business_id'],)).fetchone()
+    require(settings is not None,'INVALID_STATE','Business onboarding settings are unavailable')
+    profile_value=_validate_profile(profile)
+    policies_value=_validate_policies(policies)
+    if profile_value is not None:
+        c.execute('UPDATE business_settings SET profile_json=?,updated_at=? WHERE business_id=?',
+                  (json.dumps(profile_value),now(),actor['business_id']))
+    if policies_value is not None:
+        c.execute('UPDATE business_settings SET policies_json=?,updated_at=? WHERE business_id=?',
+                  (json.dumps(policies_value),now(),actor['business_id']))
+    if manual_bank is not None:
+        require(isinstance(manual_bank,dict),'INVALID_INPUT','Manual bank setup must be an object')
+        bank_name=str(manual_bank.get('bank_name','')).strip()
+        account_name=str(manual_bank.get('account_name','')).strip()
+        account_number=str(manual_bank.get('account_number','')).replace(' ','')
+        require(bank_name and account_name and re.fullmatch(r'[0-9]{10,20}',account_number),
+                'INVALID_INPUT','Provide valid manual bank details')
+        bank={'bank_name':bank_name[:100],'account_name':account_name[:160],
+              'account_number':account_number}
+        c.execute('''UPDATE business_settings SET payment_method='manual_bank',bank_details_json=?,updated_at=?
+                     WHERE business_id=?''',(json.dumps(bank),now(),actor['business_id']))
+    if activate_shop:
+        products=c.execute('SELECT COUNT(*) n FROM products WHERE business_id=? AND active=1',
+                           (actor['business_id'],)).fetchone()['n']
+        current=c.execute('SELECT payment_method,bank_details_json FROM business_settings WHERE business_id=?',
+                          (actor['business_id'],)).fetchone()
+        provider=c.execute("""SELECT 1 FROM provider_connections WHERE business_id=? AND provider='paystack'
+                              AND environment='test' AND status='active'""",(actor['business_id'],)).fetchone()
+        payment_ready=(current['payment_method']=='manual_bank' and current['bank_details_json']) or provider is not None
+        require(products>0,'ONBOARDING_INCOMPLETE','Add at least one approved product before activation')
+        require(bool(payment_ready),'ONBOARDING_INCOMPLETE','Connect Paystack or add manual bank details before activation')
+        method='paystack' if provider is not None else 'manual_bank'
+        c.execute('''UPDATE business_settings SET onboarding_status='active',payment_method=?,updated_at=?
+                     WHERE business_id=?''',(method,now(),actor['business_id']))
+    if any(value is not None for value in (profile_value,policies_value,manual_bank)) or activate_shop:
+        audit(c,actor,'business.onboarding_updated',actor['business_id'],{'activated':bool(activate_shop)})
+
+def link_identity(code=None, channel='shop', sender_identity=None, display_name=None, business_name=None,
+                  business_slug=None, profile=None, policies=None, manual_bank=None, activate_shop=False):
+    """Legacy code linking plus sandbox sender-routed onboarding.
+
+    sender_identity is deliberately accepted only in this sandbox. A live adapter must
+    inject the authenticated WhatsApp sender and never accept a typed phone number.
+    """
     require(os.getenv('TALLY_ENV','sandbox')=='sandbox','SANDBOX_ONLY','Demo linking is disabled outside sandbox')
+    if code:
+        return _link_identity_code(code,channel)
+    identity_hash=_sender_hash(sender_identity)
+    requested_slug=_slug(business_slug or business_name) if (business_slug or business_name) else None
+    with tx() as c:
+        if channel=='desk':
+            membership=c.execute('''SELECT a.* FROM channel_identities i JOIN actors a ON a.id=i.actor_id
+                                    JOIN business_settings s ON s.business_id=a.business_id
+                                    WHERE i.channel='desk' AND i.identity_hash=? AND a.active=1
+                                    AND (? IS NULL OR s.shop_slug=?)''',
+                                 (identity_hash,requested_slug,requested_slug)).fetchone()
+            if membership is None:
+                require(isinstance(business_name,str) and business_name.strip(),
+                        'NOT_REGISTERED','Tell Tally the business name to start onboarding')
+                slug=requested_slug
+                conflict=c.execute('SELECT business_id FROM business_settings WHERE shop_slug=?',(slug,)).fetchone()
+                require(conflict is None,'BUSINESS_EXISTS','That shop identifier is already registered')
+                placeholder=c.execute('SELECT name FROM businesses WHERE id=?',(BUSINESS_ID,)).fetchone()
+                reusable=(placeholder is not None and placeholder['name']=='Cedar Bakes (sandbox)' and
+                          c.execute("SELECT COUNT(*) n FROM channel_identities WHERE channel='desk' AND business_id=?",
+                                    (BUSINESS_ID,)).fetchone()['n']==0)
+                business_id=BUSINESS_ID if reusable else new_id('biz')
+                if reusable:
+                    c.execute('UPDATE businesses SET name=? WHERE id=?',(business_name.strip()[:160],business_id))
+                    c.execute('''UPDATE business_settings SET shop_slug=?,onboarding_status='onboarding',updated_at=?
+                                 WHERE business_id=?''',(slug,now(),business_id))
+                else:
+                    c.execute('INSERT INTO businesses VALUES(?,?,?)',(business_id,business_name.strip()[:160],'NGN'))
+                    c.execute('''INSERT INTO business_settings VALUES(?,?,?,'{}','[]',NULL,NULL,?,?)''',
+                              (business_id,slug,'onboarding',now(),now()))
+                actor_id=new_id('own')
+                c.execute('''INSERT INTO actors (id,business_id,kind,role,display_name) VALUES(?,?,?,?,?)''',
+                          (actor_id,business_id,'staff','admin',(display_name or 'Business owner')[:160]))
+                c.execute('INSERT INTO channel_identities VALUES(?,?,?,?,?)',
+                          ('desk',identity_hash,business_id,actor_id,now()))
+                membership=c.execute('SELECT * FROM actors WHERE id=?',(actor_id,)).fetchone()
+                audit(c,membership,'business.registered',business_id,{'shop_slug':slug})
+            _configure_business(c,membership,profile,policies,manual_bank,activate_shop)
+            return _issue_session(c,membership)
+        require(channel=='shop','INVALID_INPUT','Unknown channel')
+        require(requested_slug is not None,'INVALID_INPUT','A shop identifier is required')
+        settings=c.execute('SELECT * FROM business_settings WHERE shop_slug=?',(requested_slug,)).fetchone()
+        require(settings is not None and settings['onboarding_status']=='active','SHOP_UNAVAILABLE','This shop is not active')
+        membership=c.execute('''SELECT a.* FROM channel_identities i JOIN actors a ON a.id=i.actor_id
+                                WHERE i.channel='shop' AND i.identity_hash=? AND i.business_id=? AND a.active=1''',
+                             (identity_hash,settings['business_id'])).fetchone()
+        if membership is None:
+            actor_id=new_id('cus')
+            c.execute('''INSERT INTO actors (id,business_id,kind,role,display_name) VALUES(?,?,?,?,?)''',
+                      (actor_id,settings['business_id'],'customer','customer',(display_name or 'Customer')[:160]))
+            c.execute('INSERT INTO channel_identities VALUES(?,?,?,?,?)',
+                      ('shop',identity_hash,settings['business_id'],actor_id,now()))
+            membership=c.execute('SELECT * FROM actors WHERE id=?',(actor_id,)).fetchone()
+        return _issue_session(c,membership)
+
+def _link_identity_code(code,channel):
     with tx() as c:
         rec=c.execute('SELECT * FROM access_codes WHERE code_hash=?',(digest(code),)).fetchone()
         require(rec is not None and rec['used_at'] is None and rec['expires_at']>now(),
@@ -74,11 +227,7 @@ def link_identity(code, channel):
         require((channel=='shop' and a['kind']=='customer') or (channel=='desk' and a['kind']=='staff'),
                 'FORBIDDEN','Access code does not belong to this channel')
         c.execute('UPDATE access_codes SET used_at=? WHERE code_hash=?',(now(),digest(code)))
-        session=secrets.token_urlsafe(32)
-        expires=(datetime.now(timezone.utc)+timedelta(hours=2)).isoformat()
-        c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(digest(session),a['id'],expires,now()))
-        return {'session_token':session,'role':a['role'],'business_name':'Cedar Bakes (sandbox)',
-                'expires_at':expires,'note':'Sandbox access only; not verified WhatsApp channel identity.'}
+        return _issue_session(c,a)
 
 def actor_from_token(conn, token, channel):
     require(isinstance(token,str) and len(token)>20,'UNAUTHORIZED','Please link your sandbox identity first')
@@ -92,14 +241,41 @@ def actor_from_token(conn, token, channel):
 def require_role(actor,role):
     require(actor['role']==role,'FORBIDDEN',f'Only a {role} may perform this action')
 
-def get_catalog(channel='shop',session_token=None):
+def get_catalog(channel='shop',session_token=None,shop_slug=None,notion_resource_id=None):
     with tx() as c:
-        if channel=='desk':actor_from_token(c,session_token,channel)
-        products=c.execute('SELECT * FROM products WHERE business_id=? AND active=1 ORDER BY name',(BUSINESS_ID,)).fetchall()
-        return {'business':'Cedar Bakes (sandbox)','currency':'NGN','products':[
+        if channel=='desk':
+            actor=actor_from_token(c,session_token,channel);business_id=actor['business_id']
+        elif session_token:
+            actor=actor_from_token(c,session_token,'shop');business_id=actor['business_id']
+        elif shop_slug:
+            settings=c.execute("""SELECT * FROM business_settings WHERE shop_slug=?
+                                  AND onboarding_status='active'""",(_slug(shop_slug),)).fetchone()
+            require(settings is not None,'SHOP_UNAVAILABLE','This shop is not active')
+            business_id=settings['business_id']
+        else:
+            business_id=BUSINESS_ID
+        business=c.execute('SELECT * FROM businesses WHERE id=?',(business_id,)).fetchone()
+        require(business is not None,'NOT_FOUND','Business not found')
+        settings=c.execute('SELECT * FROM business_settings WHERE business_id=?',(business_id,)).fetchone()
+        products=c.execute('SELECT * FROM products WHERE business_id=? AND active=1 ORDER BY name',(business_id,)).fetchall()
+        result={'business':business['name'],'business_id':business_id,'currency':business['currency'],
+                'shop_slug':settings['shop_slug'] if settings else None,'products':[
             {'id':p['id'],'name':p['name'],'price_minor':p['price_minor'],
              'available_qty':max(0,p['stock_on_hand']-p['stock_reserved']),
              'available':p['stock_on_hand']-p['stock_reserved']>0} for p in products]}
+        if settings:
+            result['business_profile']=json.loads(settings['profile_json'] or '{}')
+            result['policies']=json.loads(settings['policies_json'] or '[]')
+        if channel=='desk' and settings:
+            resources=c.execute('''SELECT resource_id,resource_type,title FROM provider_resources
+                                   WHERE business_id=? AND provider='notion' ORDER BY title''',(business_id,)).fetchall()
+            result['onboarding']={'status':settings['onboarding_status'],
+                                  'payment_method':settings['payment_method'],
+                                  'notion_resources':[rowdict(row) for row in resources]}
+    if channel=='desk' and notion_resource_id:
+        from .notion_connections import preview_notion_resource_sync
+        result['notion_preview']=preview_notion_resource_sync(session_token,notion_resource_id)
+    return result
 
 def upsert_product(session_token,name,price_minor,stock_on_hand,low_stock_threshold=3):
     require(isinstance(name,str) and name.strip(),'INVALID_INPUT','Product name required')
@@ -121,7 +297,30 @@ def upsert_product(session_token,name,price_minor,stock_on_hand,low_stock_thresh
         audit(c,a,'product.upserted',pid,{'price_minor':price_minor,'stock_on_hand':stock_on_hand})
         return {'product_id':pid,'name':name.strip(),'price_minor':price_minor,'stock_on_hand':stock_on_hand}
 
-def create_order(session_token,items,request_id):
+def _order_payment_instructions(business_id,order_id,total_minor,payment_email=None):
+    with tx() as c:
+        settings=c.execute('SELECT payment_method,bank_details_json FROM business_settings WHERE business_id=?',
+                           (business_id,)).fetchone()
+    if not settings or not settings['payment_method']:
+        return {'method':'sandbox','status':'awaiting_external_payment','verified':False}
+    if settings['payment_method']=='manual_bank':
+        bank=json.loads(settings['bank_details_json'] or '{}')
+        return {'method':'manual_bank','status':'awaiting_manual_confirmation','bank':bank,
+                'amount_minor':total_minor,'reference':order_id,
+                'notice':'A payment claim remains unverified until an Admin confirms receipt.'}
+    if settings['payment_method']=='paystack':
+        if not payment_email:
+            return {'method':'paystack','status':'customer_email_required',
+                    'notice':'Provide an email address to create the hosted Paystack TEST checkout.'}
+        try:
+            from .paystack_connections import initialize_test_transaction
+            return initialize_test_transaction(business_id,order_id,total_minor,payment_email)
+        except (ToolFailure,ValueError):
+            return {'method':'paystack','status':'temporarily_unavailable',
+                    'notice':'The order is saved, but checkout could not be initialized. Retry with the same request_id.'}
+    return {'method':'unconfigured','status':'unavailable'}
+
+def create_order(session_token,items,request_id,payment_email=None):
     require(isinstance(request_id,str) and len(request_id)>=4,'INVALID_INPUT','Stable request_id required for safe retries')
     require(isinstance(items,list) and len(items)>0 and len(items)<=20,'INVALID_INPUT','At least one item required')
     with tx() as c:
@@ -137,21 +336,30 @@ def create_order(session_token,items,request_id):
         if prior:
             old={r['product_id']:r['qty'] for r in c.execute('SELECT product_id,qty FROM order_items WHERE order_id=?',(prior['id'],)).fetchall()}
             require(old==parsed,'IDEMPOTENCY_CONFLICT','This request ID was previously used for different items')
-            return {'order_id':prior['id'],'total_minor':prior['total_minor'],'currency':prior['currency'],'status':prior['status'],'duplicate':True}
-        total=0;rows=[]
-        for pid,qty in parsed.items():
-            p=c.execute('SELECT * FROM products WHERE business_id=? AND id=? AND active=1',(a['business_id'],pid)).fetchone()
-            require(p is not None,'UNAVAILABLE',f'Product {pid} not available')
-            available=p['stock_on_hand']-p['stock_reserved']
-            require(available>=qty,'OUT_OF_STOCK',f'{p["name"]} is unavailable in the requested quantity (available: {available})')
-            total+=p['price_minor']*qty;rows.append((p,qty))
-        oid=new_id('TLY')
-        c.execute('INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?)',(oid,a['business_id'],a['id'],total,'NGN','awaiting_payment',request_id,now(),now()))
-        for p,qty in rows:
-            c.execute('INSERT INTO order_items VALUES(?,?,?,?,?)',(oid,p['id'],p['name'],qty,p['price_minor']))
-            c.execute('UPDATE products SET stock_reserved=stock_reserved+?,updated_at=? WHERE id=?',(qty,now(),p['id']))
-        audit(c,a,'order.created',oid,{'total_minor':total})
-        return {'order_id':oid,'total_minor':total,'currency':'NGN','status':'awaiting_payment','duplicate':False}
+            result={'order_id':prior['id'],'total_minor':prior['total_minor'],'currency':prior['currency'],
+                    'status':prior['status'],'duplicate':True,'business_id':a['business_id']}
+            business_id=a['business_id'];order_id=prior['id'];order_total=prior['total_minor']
+        else:
+            total=0;rows=[]
+            for pid,qty in parsed.items():
+                p=c.execute('SELECT * FROM products WHERE business_id=? AND id=? AND active=1',(a['business_id'],pid)).fetchone()
+                require(p is not None,'UNAVAILABLE',f'Product {pid} not available')
+                available=p['stock_on_hand']-p['stock_reserved']
+                require(available>=qty,'OUT_OF_STOCK',f'{p["name"]} is unavailable in the requested quantity (available: {available})')
+                total+=p['price_minor']*qty;rows.append((p,qty))
+            oid=new_id('TLY')
+            c.execute('INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?)',(oid,a['business_id'],a['id'],total,'NGN','awaiting_payment',request_id,now(),now()))
+            for p,qty in rows:
+                c.execute('INSERT INTO order_items VALUES(?,?,?,?,?)',(oid,p['id'],p['name'],qty,p['price_minor']))
+                c.execute('UPDATE products SET stock_reserved=stock_reserved+?,updated_at=? WHERE id=?',(qty,now(),p['id']))
+            audit(c,a,'order.created',oid,{'total_minor':total})
+            result={'order_id':oid,'total_minor':total,'currency':'NGN','status':'awaiting_payment',
+                    'duplicate':False,'business_id':a['business_id']}
+            business_id=a['business_id'];order_id=oid;order_total=total
+    # Finish provider checkout after the order transaction commits. Retrying with
+    # the same request_id is safe and can recover an interrupted network call.
+    result['payment']=_order_payment_instructions(business_id,order_id,order_total,payment_email)
+    return result
 
 def get_my_order(session_token,order_id):
     with tx() as c:
@@ -170,7 +378,27 @@ def record_payment_claim(session_token,order_id,note='Customer reports transfer'
         cid=new_id('clm')
         c.execute('INSERT INTO payment_claims VALUES(?,?,?,?,?)',(cid,order_id,a['id'],str(note)[:500],now()))
         audit(c,a,'payment.claimed',order_id)
-        return {'claim_id':cid,'order_id':order_id,'status':o['status'],'verified':False}
+        business_id=a['business_id']
+        result={'claim_id':cid,'order_id':order_id,'status':o['status'],'verified':False,
+                'verification_source':None}
+    try:
+        from .paystack_connections import verify_test_transaction_for_order
+        verified=verify_test_transaction_for_order(business_id,order_id)
+    except (ToolFailure,ValueError):
+        verified={'status':'provider_unavailable'}
+    if verified and verified.get('status')=='success':
+        transaction_id=verified.get('transaction_id')
+        if type(transaction_id) is int and type(verified.get('amount_minor')) is int:
+            event=ingest_verified_payment({
+                'event_id':f'paystack-test-verify:{transaction_id}',
+                'reference':order_id,'amount_minor':verified['amount_minor'],
+                'currency':verified.get('currency'),'event_status':'success'},business_id=business_id)
+            result.update({'verified':event['match_status']=='matched','verification_source':'paystack_api',
+                           'match_status':event['match_status'],
+                           'status':'confirmed' if event['match_status']=='matched' else 'awaiting_payment'})
+            return result
+    result['provider_check_status']=verified.get('status') if verified else 'not_connected'
+    return result
 
 def ingest_verified_payment(event,business_id=BUSINESS_ID):
     require(event.get('event_status')=='success','INVALID_PAYMENT','Only successful provider events may settle orders')
@@ -202,12 +430,28 @@ def get_order_queue(session_token):
         orders=c.execute('SELECT id,customer_id,total_minor,status,created_at FROM orders WHERE business_id=? ORDER BY created_at DESC LIMIT 40',(a['business_id'],)).fetchall()
         return {'orders':[rowdict(x) for x in orders]}
 
-def update_order_status(session_token,order_id,new_status):
+def update_order_status(session_token,order_id,new_status,confirmation_note=None):
     next_status={'confirmed':'preparing','preparing':'dispatched','dispatched':'fulfilled'}
     with tx() as c:
         a=actor_from_token(c,session_token,'desk')
         o=c.execute('SELECT * FROM orders WHERE id=? AND business_id=?',(order_id,a['business_id'])).fetchone()
         require(o is not None,'NOT_FOUND','Order not found')
+        if o['status']=='awaiting_payment' and new_status=='confirmed':
+            require_role(a,'admin')
+            settings=c.execute('SELECT payment_method FROM business_settings WHERE business_id=?',
+                               (a['business_id'],)).fetchone()
+            require(settings is not None and settings['payment_method']=='manual_bank','INVALID_TRANSITION',
+                    'Only a configured manual-bank order can be confirmed by an Admin')
+            require(isinstance(confirmation_note,str) and len(confirmation_note.strip())>=4,
+                    'INVALID_INPUT','Record how the Admin confirmed the bank receipt')
+            event_id=new_id('manual')
+            c.execute('UPDATE orders SET status=?,updated_at=? WHERE id=?',('confirmed',now(),order_id))
+            c.execute('INSERT INTO payment_events VALUES(?,?,?,?,?,?,?,?,?)',
+                      (event_id,a['business_id'],order_id,o['total_minor'],o['currency'],'merchant_confirmed',
+                       'merchant_confirmed',order_id,now()))
+            audit(c,a,'payment.manually_confirmed',order_id,{'note':confirmation_note.strip()[:500]})
+            return {'order_id':order_id,'previous_status':'awaiting_payment','status':'confirmed',
+                    'payment_assurance':'merchant_confirmed_manual','provider_verified':False}
         require(next_status.get(o['status'])==new_status,'INVALID_TRANSITION',f'Cannot move {o["status"]} to {new_status}')
         c.execute('UPDATE orders SET status=?,updated_at=? WHERE id=?',(new_status,now(),order_id))
         if new_status=='fulfilled':
@@ -222,12 +466,14 @@ def get_reconciliation_report(session_token):
         a=actor_from_token(c,session_token,'desk')
         events=c.execute('SELECT event_id,reference,amount_minor,match_status FROM payment_events WHERE business_id=? ORDER BY created_at DESC',(a['business_id'],)).fetchall()
         verified_receipts=sum(e['amount_minor'] for e in events if e['match_status']=='matched')
+        manual_receipts=sum(e['amount_minor'] for e in events if e['match_status']=='merchant_confirmed')
         pending=c.execute("SELECT COUNT(*) n, COALESCE(SUM(total_minor),0) amount FROM orders WHERE business_id=? AND status='awaiting_payment'",(a['business_id'],)).fetchone()
         claims=c.execute("SELECT COUNT(*) n FROM payment_claims pc JOIN orders o ON o.id=pc.order_id WHERE o.business_id=? AND o.status='awaiting_payment'",(a['business_id'],)).fetchone()['n']
         return {'currency':'NGN','verified_matched_minor':verified_receipts,
+                'merchant_confirmed_manual_minor':manual_receipts,
                 'unpaid_orders':pending['n'],'unpaid_order_total_minor':pending['amount'],
                 'unverified_claim_count':claims,
-                'exceptions':[rowdict(e) for e in events if e['match_status']!='matched'],
+                'exceptions':[rowdict(e) for e in events if e['match_status'] not in ('matched','merchant_confirmed')],
                 'matched_payment_count':sum(e['match_status']=='matched' for e in events)}
 
 def get_inventory_alerts(session_token):

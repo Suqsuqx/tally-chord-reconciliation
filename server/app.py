@@ -121,9 +121,10 @@ PAYSTACK_SETUP_HTML="""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect Paystack to Tally</title>
 <style>body{font:16px system-ui;max-width:34rem;margin:3rem auto;padding:0 1rem}label{display:block;margin:1rem 0}input{width:100%;padding:.7rem}button{padding:.8rem 1rem}</style>
-<h1>Connect Paystack TEST</h1><p>Enter credentials from your Paystack dashboard. They are sent directly to Tally and are never placed in chat.</p>
+<h1>Connect Paystack TEST</h1><p>Create a restricted TEST key with <strong>transactions:write</strong>. It is sent directly to Tally and never placed in chat.</p>
 <form id="setup"><label>Restricted TEST key<input id="key" type="password" autocomplete="off" required></label>
-<label>Webhook signing secret<input id="secret" type="password" autocomplete="off" required></label>
+<label>Webhook signing secret (optional)<input id="secret" type="password" autocomplete="off"></label>
+<p>You can skip the webhook secret. Tally will verify a customer payment claim directly with Paystack. Add a <code>whsec_</code> secret later only if you want instant event updates.</p>
 <button>Connect</button></form><p id="result" role="status"></p>
 <script>const token=new URLSearchParams(location.hash.slice(1)).get('token')||'';history.replaceState(null,'',location.pathname);
 document.querySelector('#setup').addEventListener('submit',async e=>{e.preventDefault();const result=document.querySelector('#result');result.textContent='Connecting…';

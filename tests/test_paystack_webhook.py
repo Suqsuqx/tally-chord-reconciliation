@@ -36,7 +36,7 @@ def setup(tmp_path, monkeypatch):
 
 
 async def fake_verify(_key):
-    return {"permissions": ["transaction:read"], "provider_account_ref": "sandbox-account"}
+    return {"permissions": ["transactions:write"], "provider_account_ref": "sandbox-account"}
 
 
 def connect_admin():

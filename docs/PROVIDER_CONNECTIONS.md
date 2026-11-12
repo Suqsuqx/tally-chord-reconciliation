@@ -47,7 +47,7 @@ Do not place `rk_test_`, `whsec_`, Notion merchant tokens, setup tokens or OAuth
 The first acceptance stops before catalogue import or payment settlement:
 
 1. ASYAN SHOP Admin links the existing sandbox identity and receives private provider setup links.
-2. The Admin submits a Paystack TEST restricted key and independent `whsec_` signing secret through the HTTPS form; Tally validates transaction-read access and stores ciphertext only.
+2. The Admin submits a Paystack TEST restricted key with `transactions:write` through the HTTPS form; Tally proves read plus initialize scope and stores ciphertext only. An independent `whsec_` signing secret is optional for instant webhook updates, not required for claim-triggered API verification.
 3. The Admin opens Connect Notion, authorizes Tally's own integration and selects the intended ASYAN SHOP pages.
 4. The callback exchanges and encrypts both OAuth tokens, discovers selected resources and probes actual page/data-source reads.
 5. Tally generates a bounded preview; no SQL business record is created until a separate Admin approval/import gate is implemented and tested.
@@ -56,7 +56,7 @@ PASS requires sanitized HTTP/tool traces, ciphertext-only database inspection, s
 
 ## Explicitly still out of scope for this gate
 
-- Paystack transaction initialization, hosted test checkout, genuine event reconciliation and restricted-key write capability verification.
+- Live-provider acceptance of Paystack transaction initialization, hosted test checkout and claim-triggered API verification. The implementation and mocked security tests are present, but genuine Paystack responses remain unverified.
 - Approved catalogue/profile/policy import into SQL.
 - Notion Orders write and readback.
 - Trusted WhatsApp sender authentication, multi-business customer routing and the final simulator recording.

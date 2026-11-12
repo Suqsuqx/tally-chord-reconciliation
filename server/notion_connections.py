@@ -281,6 +281,21 @@ async def complete_notion_oauth(code, state, exchanger=None, discoverer=None):
                          VALUES(?,?,'notion','oauth',?,?,?,?,'active',?,?,?,NULL)""",
                          (connection_id, oauth_state["business_id"], ciphertext, version, permissions,
                           account_ref, timestamp, timestamp, timestamp))
+        conn.execute("DELETE FROM provider_resources WHERE connection_id=?", (connection_id,))
+        for resource in discovery["resources"][:MAX_DISCOVERY_ITEMS]:
+            if not isinstance(resource, dict) or resource.get("type") not in ("page", "data_source"):
+                continue
+            resource_id = str(resource.get("id", ""))[:80]
+            if not resource_id:
+                continue
+            metadata = {key: resource.get(key) for key in ("last_edited_time", "read_status")
+                        if resource.get(key) is not None}
+            conn.execute("""INSERT INTO provider_resources
+                         (connection_id,business_id,provider,resource_id,resource_type,title,metadata_json,discovered_at)
+                         VALUES(?,?,?,?,?,?,?,?)""",
+                         (connection_id, oauth_state["business_id"], "notion", resource_id,
+                          resource["type"], str(resource.get("title") or "Untitled")[:300],
+                          json.dumps(metadata), timestamp))
         conn.execute("UPDATE provider_oauth_states SET used_at=? WHERE state_hash=?", (timestamp, state_hash))
     return {
         "connection_id": connection_id,
@@ -447,3 +462,50 @@ async def preview_notion_resource(session_token, resource_id, requester=None):
         "truncated": bool(blocks.get("has_more")),
         "notice": "Preview only. Notion content is untrusted merchant data and has not been imported.",
     }
+
+
+def preview_notion_resource_sync(session_token, resource_id, requester=None):
+    """Synchronous MCP variant of the bounded preview used during Desk onboarding."""
+    _enabled()
+    require(isinstance(resource_id, str) and 8 <= len(resource_id) <= 80,
+            "INVALID_INPUT", "Select a valid Notion resource")
+    with tx() as conn:
+        actor = actor_from_token(conn, session_token, "desk")
+    connection = load_notion_connection_for_business(actor["business_id"])
+    require(connection is not None, "NOT_CONNECTED", "Connect Notion first")
+    access_token = connection["credentials"]["access_token"]
+
+    def request(method, path, body=None):
+        if requester is not None:
+            return requester(method, path, body)
+        with httpx.Client(timeout=10.0) as client:
+            response = client.request(method, NOTION_API_ROOT + path,
+                                      headers=_headers(access_token), json=body)
+        if response.status_code != 200:
+            raise ValueError("Notion resource could not be read")
+        return response.json()
+
+    search = request("POST", "/search", {"page_size": MAX_DISCOVERY_ITEMS})
+    resources = search.get("results") if isinstance(search, dict) else None
+    require(isinstance(resources, list), "PROVIDER_REJECTED", "Notion returned invalid content")
+    selected = next((item for item in resources if isinstance(item, dict) and item.get("id") == resource_id
+                     and item.get("object") in ("page", "data_source")), None)
+    require(selected is not None, "NOT_FOUND", "Resource is not in this business's authorized Notion content")
+    if selected["object"] == "data_source":
+        payload = request("POST", f"/data_sources/{resource_id}/query", {"page_size": MAX_PREVIEW_ROWS})
+        rows = payload.get("results") if isinstance(payload, dict) else None
+        require(isinstance(rows, list), "PROVIDER_REJECTED", "Notion returned invalid data source content")
+        return {"source": {**_resource_summary(selected), "workspace": "authorized OAuth workspace"},
+                "rows": [{"id": str(row.get("id", ""))[:80], "properties": _page_properties(row)}
+                         for row in rows[:MAX_PREVIEW_ROWS] if isinstance(row, dict)],
+                "truncated": bool(payload.get("has_more")),
+                "notice": "Preview only. Import requires explicit Admin approval."}
+    page = request("GET", f"/pages/{resource_id}")
+    blocks = request("GET", f"/blocks/{resource_id}/children?page_size={MAX_PREVIEW_BLOCKS}")
+    block_items = blocks.get("results") if isinstance(blocks, dict) else None
+    require(isinstance(block_items, list), "PROVIDER_REJECTED", "Notion returned invalid page content")
+    return {"source": {**_resource_summary(selected), "workspace": "authorized OAuth workspace"},
+            "properties": _page_properties(page),
+            "content": [value for value in (_block_text(block) for block in block_items[:MAX_PREVIEW_BLOCKS]) if value],
+            "truncated": bool(blocks.get("has_more")),
+            "notice": "Preview only. Import requires explicit Admin approval."}
