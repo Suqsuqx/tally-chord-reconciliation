@@ -37,24 +37,37 @@ def issue_paystack_setup_link(session_token, ttl_minutes=10):
 
 
 async def verify_restricted_key(restricted_key):
-    if not isinstance(restricted_key, str) or not restricted_key.startswith("rk_test_"):
-        raise ValueError("A Paystack TEST restricted key is required")
+    require(isinstance(restricted_key, str) and restricted_key.startswith("rk_test_"),
+            "INVALID_KEY", "Use a Paystack restricted TEST key beginning rk_test_.")
     headers = {"Authorization": "Bearer " + restricted_key, "Accept": "application/json"}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get("https://api.paystack.co/transaction", params={"perPage": 1}, headers=headers)
-        # Paystack evaluates restricted-key scope before request validation. An
-        # intentionally incomplete initialize request must reach validation
-        # (400/422), not authorization (403), to prove transactions:write.
-        write_probe = await client.post("https://api.paystack.co/transaction/initialize",
-                                        headers={**headers,"Content-Type":"application/json"}, json={})
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get("https://api.paystack.co/transaction", params={"perPage": 1}, headers=headers)
+            # Paystack evaluates restricted-key scope before request validation. An
+            # intentionally incomplete initialize request must reach validation
+            # (400/422), not authorization (403), to prove transactions:write.
+            write_probe = await client.post("https://api.paystack.co/transaction/initialize",
+                                            headers={**headers,"Content-Type":"application/json"}, json={})
+    except httpx.HTTPError as exc:
+        raise ToolFailure("PROVIDER_UNAVAILABLE",
+                          "Tally could not reach Paystack. Try a fresh setup link shortly.") from exc
+    statuses = {response.status_code, write_probe.status_code}
+    if 401 in statuses:
+        raise ToolFailure("INVALID_KEY",
+                          "Paystack rejected this restricted TEST key. Check that it is complete, active and begins rk_test_.")
+    if 403 in statuses:
+        raise ToolFailure("INSUFFICIENT_SCOPE",
+                          "This restricted key needs Paystack transactions:write permission.")
     if response.status_code != 200 or write_probe.status_code not in (400, 422):
-        raise ValueError("Paystack rejected the restricted key or required permission")
+        raise ToolFailure("PROVIDER_REJECTED",
+                          "Paystack could not validate this restricted TEST key. Check the key and try again.")
     try:
         payload = response.json()
     except ValueError as exc:
-        raise ValueError("Paystack returned an invalid verification response") from exc
-    if payload.get("status") is not True or not isinstance(payload.get("data"), list):
-        raise ValueError("Paystack connection verification failed")
+        raise ToolFailure("PROVIDER_REJECTED",
+                          "Paystack returned an unexpected validation response. Try again shortly.") from exc
+    require(payload.get("status") is True and isinstance(payload.get("data"), list),
+            "PROVIDER_REJECTED", "Paystack could not validate this restricted TEST key.")
     return {"permissions": ["transactions:write"], "provider_account_ref": None}
 
 
@@ -62,7 +75,7 @@ async def complete_paystack_setup(setup_token, restricted_key, webhook_secret=No
     require(isinstance(setup_token, str) and len(setup_token) > 30,
             "INVALID_SETUP", "Setup link is invalid or expired")
     require(isinstance(restricted_key, str) and restricted_key.startswith("rk_test_"),
-            "INVALID_KEY", "A Paystack TEST restricted key is required")
+            "INVALID_KEY", "Use a Paystack restricted TEST key beginning rk_test_.")
     if webhook_secret not in (None, ""):
         require(isinstance(webhook_secret, str) and webhook_secret.startswith("whsec_") and len(webhook_secret) > 12,
                 "INVALID_WEBHOOK_SECRET", "Enter a valid Paystack webhook signing secret")

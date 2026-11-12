@@ -105,3 +105,22 @@ def test_setup_page_is_no_store_and_token_stays_in_fragment():
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+    assert "rk_test_" in response.text
+    assert "sk_test_" in response.text
+
+
+def test_setup_rejects_account_wide_secret_with_safe_actionable_error():
+    admin = link_identity(issue_link_code("staff-eni"), "desk")["session_token"]
+    setup_link = issue_paystack_setup_link(admin)
+    token = parse_qs(urlsplit(setup_link["setup_url"]).fragment)["token"][0]
+    submitted = "sk_test_full_access_must_not_be_accepted"
+    with TestClient(app) as client:
+        response = client.post("/integrations/paystack/connect", json={
+            "setup_token": token,
+            "restricted_key": submitted,
+            "webhook_secret": "",
+        })
+    assert response.status_code == 400
+    assert response.json()["error"] == "INVALID_KEY"
+    assert "rk_test_" in response.json()["message"]
+    assert submitted not in response.text

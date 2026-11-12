@@ -122,7 +122,8 @@ PAYSTACK_SETUP_HTML="""<!doctype html>
 <title>Connect Paystack to Tally</title>
 <style>body{font:16px system-ui;max-width:34rem;margin:3rem auto;padding:0 1rem}label{display:block;margin:1rem 0}input{width:100%;padding:.7rem}button{padding:.8rem 1rem}</style>
 <h1>Connect Paystack TEST</h1><p>Create a restricted TEST key with <strong>transactions:write</strong>. It is sent directly to Tally and never placed in chat.</p>
-<form id="setup"><label>Restricted TEST key<input id="key" type="password" autocomplete="off" required></label>
+<p>Use the full key beginning <code>rk_test_</code>. Do not use a public <code>pk_test_</code> key or an account-wide <code>sk_test_</code> secret key.</p>
+<form id="setup"><label>Restricted TEST key<input id="key" type="password" autocomplete="off" placeholder="rk_test_…" pattern="rk_test_.+" spellcheck="false" required></label>
 <label>Webhook signing secret (optional)<input id="secret" type="password" autocomplete="off"></label>
 <p>You can skip the webhook secret. Tally will verify a customer payment claim directly with Paystack. Add a <code>whsec_</code> secret later only if you want instant event updates.</p>
 <button>Connect</button></form><p id="result" role="status"></p>
@@ -146,8 +147,15 @@ async def paystack_connect(request:Request):
         if not isinstance(data,dict):raise ValueError('Invalid setup request')
         result=await complete_paystack_setup(data.get('setup_token'),data.get('restricted_key'),data.get('webhook_secret'))
         return JSONResponse(result)
-    except (json.JSONDecodeError,ValueError,ToolFailure):
-        return JSONResponse({'error':'CONNECTION_FAILED','message':'Connection failed. Request a new setup link.'},status_code=400)
+    except ToolFailure as exc:
+        logger.info('paystack_setup_failed code=%s',exc.code)
+        return JSONResponse({'error':exc.code,'message':exc.message},status_code=400,
+                            headers={'Cache-Control':'no-store'})
+    except (json.JSONDecodeError,ValueError):
+        logger.info('paystack_setup_failed code=INVALID_REQUEST')
+        return JSONResponse({'error':'INVALID_REQUEST',
+                             'message':'The Paystack setup request was invalid. Request a fresh link and try again.'},
+                            status_code=400,headers={'Cache-Control':'no-store'})
 
 NOTION_SETUP_HTML="""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
