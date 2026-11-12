@@ -81,16 +81,20 @@ def _sender_hash(sender_identity):
     normalized=' '.join(sender_identity.strip().lower().split())
     return digest('tally|sandbox-sender|'+normalized)
 
-def _issue_session(c,actor):
+def _issue_session(c,actor,registration_status='resumed'):
     session=secrets.token_urlsafe(32)
     expires=(datetime.now(timezone.utc)+timedelta(hours=2)).isoformat()
     c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(digest(session),actor['id'],expires,now()))
     business=c.execute('SELECT name FROM businesses WHERE id=?',(actor['business_id'],)).fetchone()
     settings=c.execute('SELECT shop_slug,onboarding_status FROM business_settings WHERE business_id=?',
                        (actor['business_id'],)).fetchone()
+    product_count=c.execute('SELECT COUNT(*) n FROM products WHERE business_id=? AND active=1',
+                            (actor['business_id'],)).fetchone()['n']
     return {'session_token':session,'role':actor['role'],'business_id':actor['business_id'],
             'business_name':business['name'],'shop_slug':settings['shop_slug'] if settings else None,
             'shop_status':settings['onboarding_status'] if settings else 'onboarding',
+            'registration_status':registration_status,
+            'catalogue':{'product_count':product_count},
             'expires_at':expires,
             'identity_assurance':'unverified_simulator' if actor['id'].startswith(('own-','cus-')) else 'sandbox_code',
             'note':'Sandbox routing only. The live product must derive identity from the authenticated WhatsApp sender.'}
@@ -155,7 +159,8 @@ def _configure_business(c,actor,profile=None,policies=None,manual_bank=None,acti
         audit(c,actor,'business.onboarding_updated',actor['business_id'],{'activated':bool(activate_shop)})
 
 def link_identity(code=None, channel='shop', sender_identity=None, display_name=None, business_name=None,
-                  business_slug=None, profile=None, policies=None, manual_bank=None, activate_shop=False):
+                  business_slug=None, profile=None, policies=None, manual_bank=None, activate_shop=False,
+                  notion_workspace=None):
     """Legacy code linking plus sandbox sender-routed onboarding.
 
     sender_identity is deliberately accepted only in this sandbox. A live adapter must
@@ -173,25 +178,18 @@ def link_identity(code=None, channel='shop', sender_identity=None, display_name=
                                     WHERE i.channel='desk' AND i.identity_hash=? AND a.active=1
                                     AND (? IS NULL OR s.shop_slug=?)''',
                                  (identity_hash,requested_slug,requested_slug)).fetchone()
+            created=False
             if membership is None:
                 require(isinstance(business_name,str) and business_name.strip(),
                         'NOT_REGISTERED','Tell Tally the business name to start onboarding')
                 slug=requested_slug
                 conflict=c.execute('SELECT business_id FROM business_settings WHERE shop_slug=?',(slug,)).fetchone()
                 require(conflict is None,'BUSINESS_EXISTS','That shop identifier is already registered')
-                placeholder=c.execute('SELECT name FROM businesses WHERE id=?',(BUSINESS_ID,)).fetchone()
-                reusable=(placeholder is not None and placeholder['name']=='Cedar Bakes (sandbox)' and
-                          c.execute("SELECT COUNT(*) n FROM channel_identities WHERE channel='desk' AND business_id=?",
-                                    (BUSINESS_ID,)).fetchone()['n']==0)
-                business_id=BUSINESS_ID if reusable else new_id('biz')
-                if reusable:
-                    c.execute('UPDATE businesses SET name=? WHERE id=?',(business_name.strip()[:160],business_id))
-                    c.execute('''UPDATE business_settings SET shop_slug=?,onboarding_status='onboarding',updated_at=?
-                                 WHERE business_id=?''',(slug,now(),business_id))
-                else:
-                    c.execute('INSERT INTO businesses VALUES(?,?,?)',(business_id,business_name.strip()[:160],'NGN'))
-                    c.execute('''INSERT INTO business_settings VALUES(?,?,?,'{}','[]',NULL,NULL,?,?)''',
-                              (business_id,slug,'onboarding',now(),now()))
+                business_id=new_id('biz')
+                c.execute('INSERT INTO businesses VALUES(?,?,?)',(business_id,business_name.strip()[:160],'NGN'))
+                c.execute('''INSERT INTO business_settings VALUES(?,?,?,'{}','[]',NULL,NULL,?,?)''',
+                          (business_id,slug,'onboarding',now(),now()))
+                created=True
                 actor_id=new_id('own')
                 c.execute('''INSERT INTO actors (id,business_id,kind,role,display_name) VALUES(?,?,?,?,?)''',
                           (actor_id,business_id,'staff','admin',(display_name or 'Business owner')[:160]))
@@ -200,7 +198,7 @@ def link_identity(code=None, channel='shop', sender_identity=None, display_name=
                 membership=c.execute('SELECT * FROM actors WHERE id=?',(actor_id,)).fetchone()
                 audit(c,membership,'business.registered',business_id,{'shop_slug':slug})
             _configure_business(c,membership,profile,policies,manual_bank,activate_shop)
-            return _issue_session(c,membership)
+            return _issue_session(c,membership,'created' if created else 'resumed')
         require(channel=='shop','INVALID_INPUT','Unknown channel')
         require(requested_slug is not None,'INVALID_INPUT','A shop identifier is required')
         settings=c.execute('SELECT * FROM business_settings WHERE shop_slug=?',(requested_slug,)).fetchone()

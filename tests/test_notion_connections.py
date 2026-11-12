@@ -7,11 +7,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.app import app
-from server.business import ToolFailure, issue_link_code, link_identity, seed
+from server.business import ToolFailure, issue_link_code, link_identity, seed, upsert_product
 from server.db import tx
 from server.notion_connections import (cancel_notion_oauth, complete_notion_oauth, issue_notion_setup_link,
-    load_notion_connection_for_business, preview_notion_resource, refresh_notion_connection,
-    start_notion_oauth)
+    initialize_notion_workspace_sync, load_notion_connection_for_business, preview_notion_resource,
+    refresh_notion_connection, start_notion_oauth, sync_business_snapshot, sync_product_snapshot)
 from server.mcp import process
 
 
@@ -241,7 +241,7 @@ def test_notion_setup_page_has_no_store_and_strict_browser_policy():
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
-    assert "Nothing is imported until you approve" in response.text
+    assert "Nothing is imported or written until you approve" in response.text
 
 
 def test_initial_admin_link_returns_provider_setup_links_without_expanding_desk_tools(monkeypatch):
@@ -260,3 +260,47 @@ def test_initial_admin_link_returns_provider_setup_links_without_expanding_desk_
     )
     discovery = process("desk", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert len(discovery["result"]["tools"]) == 11
+
+
+def test_admin_can_create_and_update_merchant_readable_notion_workspace():
+    connect_notion()
+    session = desk_session()
+    calls = []
+    page_number = 0
+
+    def requester(method, path, body):
+        nonlocal page_number
+        calls.append((method, path, body))
+        if method == "POST" and path == "/pages":
+            page_number += 1
+            return {"id": f"created-notion-page-{page_number}"}
+        if method == "PATCH" and path.startswith("/blocks/"):
+            return {"object": "list", "results": []}
+        raise AssertionError((method, path))
+
+    workspace = initialize_notion_workspace_sync(
+        session, "page-asyan-profile", requester=requester
+    )
+    assert workspace["status"] == "active"
+    assert workspace["created"] is True
+    assert workspace["sections"] == ["activity", "catalogue", "orders", "policies", "profile"]
+    assert len([call for call in calls if call[:2] == ("POST", "/pages")]) == 5
+
+    with tx() as conn:
+        conn.execute("""UPDATE business_settings SET profile_json=?,policies_json=?
+                     WHERE business_id='sandbox-cedar-bakes'""",
+                     (json.dumps({"description": "Friendly neighbourhood bakery"}),
+                      json.dumps([{"question": "Delivery?", "answer": "Same-day in the test area."}])))
+    assert sync_business_snapshot(session, requester=requester)["status"] == "synced"
+
+    product = upsert_product(session, "Approved cupcake", 250000, 12, 3)
+    first = sync_product_snapshot(session, product["product_id"], requester=requester)
+    assert first["status"] == "synced"
+    second = sync_product_snapshot(session, product["product_id"], requester=requester)
+    assert second["status"] == "synced"
+    with tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM notion_workspaces").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM notion_records WHERE record_type='product'").fetchone()[0] == 1
+    product_pages = [call for call in calls if call[0] == "POST" and call[1] == "/pages"
+                     and call[2]["properties"]["title"]["title"][0]["text"]["content"] == "Approved cupcake"]
+    assert len(product_pages) == 1

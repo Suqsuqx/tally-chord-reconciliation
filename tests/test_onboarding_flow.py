@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -7,8 +8,9 @@ import pytest
 import server.paystack_connections as paystack
 from server.business import (BUSINESS_ID, ToolFailure, create_order, get_catalog,
     get_my_order, get_reconciliation_report, link_identity, record_payment_claim,
-    seed, update_order_status)
+    seed, update_order_status, upsert_product)
 from server.db import tx
+from server.mcp import process
 
 
 @pytest.fixture(autouse=True)
@@ -27,26 +29,60 @@ def setup(tmp_path, monkeypatch):
 def register_owner(**extra):
     return link_identity(channel="desk", sender_identity="sim-owner-asyan",
                          display_name="ASYAN owner", business_name="ASYAN SHOP",
-                         business_slug="asyan-shop", **extra)
+                         **extra)
 
 
-def test_conversational_registration_reuses_placeholder_and_preserves_catalogue():
+def product_id(session_token, name):
+    products = get_catalog(channel="desk", session_token=session_token)["products"]
+    return next(product["id"] for product in products if product["name"] == name)
+
+
+def test_conversational_registration_creates_empty_business():
     owner = register_owner(profile={"description": "Sandbox merchant"})
-    assert owner["business_id"] == BUSINESS_ID
+    assert owner["business_id"] != BUSINESS_ID
     assert owner["business_name"] == "ASYAN SHOP"
+    assert owner["shop_slug"] == "asyan-shop"
     assert owner["shop_status"] == "onboarding"
+    assert owner["registration_status"] == "created"
+    assert owner["catalogue"] == {"product_count": 0}
     assert owner["identity_assurance"] == "unverified_simulator"
-    assert len(get_catalog(channel="desk", session_token=owner["session_token"])["products"]) == 3
+    assert get_catalog(channel="desk", session_token=owner["session_token"])["products"] == []
 
     resumed = link_identity(channel="desk", sender_identity="sim-owner-asyan",
                             business_slug="asyan-shop")
     assert resumed["business_id"] == owner["business_id"]
+    assert resumed["registration_status"] == "resumed"
+    assert resumed["catalogue"] == {"product_count": 0}
     with tx() as conn:
         assert conn.execute("SELECT COUNT(*) FROM businesses WHERE name='ASYAN SHOP'").fetchone()[0] == 1
+        assert conn.execute("SELECT name FROM businesses WHERE id=?", (BUSINESS_ID,)).fetchone()[0] == "Cedar Bakes (sandbox)"
+
+
+def test_prompt_only_registration_returns_both_secure_provider_links(monkeypatch):
+    monkeypatch.setenv("TALLY_NOTION_CONNECTIONS_ENABLED", "true")
+    monkeypatch.setenv("NOTION_CLIENT_ID", "notion-test-client")
+    monkeypatch.setenv("NOTION_CLIENT_SECRET", "notion-test-secret")
+    monkeypatch.setenv("NOTION_OAUTH_REDIRECT_URI",
+                       "https://tally.example/integrations/notion/callback")
+    response = process("desk", {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "link_identity", "arguments": {
+            "sender_identity": "sim-owner-prompt-only", "business_name": "ASYAN SHOP",
+        }},
+    })
+    result = json.loads(response["result"]["content"][0]["text"])
+    assert result["registration_status"] == "created"
+    assert result["shop_slug"] == "asyan-shop"
+    assert result["catalogue"]["product_count"] == 0
+    assert result["provider_setup"]["paystack"]["setup_url"].startswith(
+        "https://tally.example/integrations/paystack/setup#token=")
+    assert result["provider_setup"]["notion"]["setup_url"].startswith(
+        "https://tally.example/integrations/notion/setup#token=")
 
 
 def test_manual_bank_shop_activation_customer_order_claim_and_admin_confirmation():
-    register_owner()
+    first = register_owner()
+    upsert_product(first["session_token"], "Chocolate cupcake", 250000, 14, 3)
     owner = link_identity(
         channel="desk", sender_identity="sim-owner-asyan", business_slug="asyan-shop",
         manual_bank={"bank_name": "Sandbox Bank", "account_name": "ASYAN SHOP TEST",
@@ -54,7 +90,9 @@ def test_manual_bank_shop_activation_customer_order_claim_and_admin_confirmation
     )
     customer = link_identity(channel="shop", sender_identity="sim-customer-one",
                              display_name="Test customer", business_slug="asyan-shop")
-    order = create_order(customer["session_token"], [{"product_id": "cup-choc", "quantity": 1}],
+    order = create_order(customer["session_token"],
+                         [{"product_id": product_id(owner["session_token"], "Chocolate cupcake"),
+                           "quantity": 1}],
                          "asyan-manual-001")
     assert order["payment"]["method"] == "manual_bank"
     claim = record_payment_claim(customer["session_token"], order["order_id"], "I paid by transfer")
@@ -69,7 +107,12 @@ def test_manual_bank_shop_activation_customer_order_claim_and_admin_confirmation
 
 
 def test_inactive_or_wrong_shop_context_is_rejected():
-    register_owner()
+    owner = register_owner()
+    with pytest.raises(ToolFailure) as error:
+        link_identity(channel="desk", sender_identity="sim-owner-asyan",
+                      business_slug="asyan-shop", activate_shop=True)
+    assert error.value.code == "ONBOARDING_INCOMPLETE"
+    assert owner["catalogue"]["product_count"] == 0
     with pytest.raises(ToolFailure) as error:
         link_identity(channel="shop", sender_identity="sim-customer-one", business_slug="asyan-shop")
     assert error.value.code == "SHOP_UNAVAILABLE"
@@ -83,6 +126,7 @@ async def fake_write_verify(_key):
 
 def test_paystack_connection_needs_only_restricted_key_and_claim_is_api_verified(monkeypatch):
     owner = register_owner()
+    upsert_product(owner["session_token"], "Brownie box", 650000, 5, 2)
     setup_link = paystack.issue_paystack_setup_link(owner["session_token"])
     token = parse_qs(urlsplit(setup_link["setup_url"]).fragment)["token"][0]
     connected = asyncio.run(paystack.complete_paystack_setup(
@@ -99,7 +143,9 @@ def test_paystack_connection_needs_only_restricted_key_and_claim_is_api_verified
                         lambda *_args, **_kwargs: {"method": "paystack", "status": "initialized",
                                                   "authorization_url": "https://checkout.paystack.test/demo",
                                                   "reference": "asyan-reference"})
-    order = create_order(customer["session_token"], [{"product_id": "brownie", "quantity": 1}],
+    order = create_order(customer["session_token"],
+                         [{"product_id": product_id(owner["session_token"], "Brownie box"),
+                           "quantity": 1}],
                          "asyan-paystack-001", payment_email="customer@example.test")
     assert order["payment"]["status"] == "initialized"
     monkeypatch.setattr(paystack, "verify_test_transaction_for_order",

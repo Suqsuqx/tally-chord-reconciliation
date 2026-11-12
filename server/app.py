@@ -154,7 +154,8 @@ NOTION_SETUP_HTML="""<!doctype html>
 <title>Connect Notion to Tally</title>
 <style>body{font:16px system-ui;max-width:34rem;margin:3rem auto;padding:0 1rem}button{padding:.8rem 1rem}</style>
 <h1>Connect Notion</h1>
-<p>Notion will ask you to choose the ASYAN SHOP pages Tally may read. Nothing is imported until you approve a preview.</p>
+<p>Notion will ask you to choose the business pages Tally may use. Tally can preview existing content, or—with your separate approval—create and maintain Profile, Catalogue, Policies, Orders and Activity sections inside a page you select.</p>
+<p>Nothing is imported or written until you approve it in Tally.</p>
 <button id="connect">Choose pages in Notion</button><p id="result" role="status"></p>
 <script>const token=new URLSearchParams(location.hash.slice(1)).get('token')||'';history.replaceState(null,'',location.pathname);
 document.querySelector('#connect').addEventListener('click',async()=>{const result=document.querySelector('#result');result.textContent='Opening Notion…';
@@ -193,7 +194,7 @@ async def notion_callback(request:Request):
         result=await complete_notion_oauth(code,state)
         count=len(result['authorized_resources'])
         readable=sum(item.get('read_status')=='readable' for item in result['authorized_resources'])
-        body=f'<!doctype html><meta charset="utf-8"><title>Notion connected</title><p>Notion connected. Tally discovered {count} authorized resource(s) and verified content reads for {readable}. You may close this page and return to Tally for the import preview.</p>'
+        body=f'<!doctype html><meta charset="utf-8"><title>Notion connected</title><p>Notion connected. Tally discovered {count} authorized resource(s) and verified content reads for {readable}. You may close this page and return to Tally to preview existing data or approve a page for your Tally workspace.</p>'
         return HTMLResponse(body,headers=NO_STORE_HEADERS)
     except (ValueError,ToolFailure):
         return HTMLResponse('<!doctype html><meta charset="utf-8"><title>Notion connection failed</title><p>Notion could not be connected. Return to Tally and request a new setup link.</p>',

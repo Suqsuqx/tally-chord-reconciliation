@@ -12,7 +12,7 @@ Tally is a WhatsApp-first business operations assistant that keeps merchant orde
 
 ## 2. Experience, actors and permissions
 
-Two separately configured Chord teammates work with a single sandbox merchant (Cedar Bakes), one sandbox database and explicit tool scopes.
+Two separately configured Chord teammates work with sandbox merchants in one multi-tenant database and explicit tool scopes. A merchant is created conversationally; Cedar Bakes remains only a legacy regression fixture.
 
 | Teammate / actor | Purpose and accessible operations |
 |---|---|
@@ -26,7 +26,7 @@ Multiple individual staff may hold Admin or Operator roles. Business membership,
 
 ## 3. Merchant setup and catalogue
 
-The assessment begins with an already configured test business and test staff memberships. An Admin uses Tally Desk to add or update a small catalogue by conversational text. Tally previews names, prices, stock counts and warning thresholds before calling the catalogue tool. The API accepts NGN amounts as integer **kobo** and calculates available quantity as physical stock on hand minus units reserved on existing orders. The customer agent reads the same persisted catalogue, and order creation rechecks availability transactionally.
+The assessment begins when the merchant messages Tally Desk to register a business. That message creates an empty tenant and assigns the current simulator sender as its sandbox Admin; it does not claim or copy a pre-registered business. The Admin then supplies business details and catalogue through conversation, uploaded files or authorized Notion documents. Tally previews names, prices, stock counts and warning thresholds before approved writes. An empty authorized Notion parent can also become a merchant-readable Tally workspace with Profile, Catalogue, Policies & FAQ, Orders, and Activity & Reconciliation sections. SQL remains authoritative and approved records are mirrored to Notion. The API accepts NGN amounts as integer **kobo** and calculates available quantity as physical stock on hand minus units reserved on existing orders. The customer agent reads the same persisted catalogue, and order creation rechecks availability transactionally.
 
 ## 4. Customer order and payment reconciliation
 

@@ -122,6 +122,14 @@ async def webhook(connection_id: str, request: Request):
             "currency": event["currency"],
             "event_status": "success",
         }, business_id=connection["business_id"])
+        if result.get("order_id"):
+            try:
+                from .notion_connections import sync_order_snapshot
+                sync_order_snapshot(result["order_id"])
+            except Exception:
+                # Payment settlement is authoritative in SQL. A Notion mirror
+                # failure must never reject or roll back a valid provider event.
+                pass
         return JSONResponse({"status": "processed", "match_status": result["match_status"],
                              "duplicate": result["duplicate"]})
     except (ValueError, ToolFailure):

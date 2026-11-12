@@ -110,6 +110,17 @@ CREATE TABLE IF NOT EXISTS provider_resources (
  metadata_json TEXT NOT NULL DEFAULT '{}', discovered_at TEXT NOT NULL,
  PRIMARY KEY(connection_id,resource_id)
 );
+CREATE TABLE IF NOT EXISTS notion_workspaces (
+ business_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, parent_page_id TEXT NOT NULL,
+ profile_page_id TEXT NOT NULL, catalogue_page_id TEXT NOT NULL, policies_page_id TEXT NOT NULL,
+ orders_page_id TEXT NOT NULL, activity_page_id TEXT NOT NULL,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notion_records (
+ business_id TEXT NOT NULL, record_type TEXT NOT NULL, record_id TEXT NOT NULL,
+ notion_page_id TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(business_id,record_type,record_id)
+);
 """
 
 def db_path():
