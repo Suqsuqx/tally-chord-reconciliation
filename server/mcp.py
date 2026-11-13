@@ -42,8 +42,8 @@ SHOP={
  'get_my_support_case':S('Read one customer-owned case and recorded staff reply.',{'session_token':TOKEN,'case_id':P('Case reference')},['session_token','case_id']),
 }
 DESK={
- 'link_identity':S('Register or resume a sandbox merchant from simulator sender context; also accepts legacy staff codes. Live identity comes from authenticated WhatsApp. Admin may save only merchant-approved profile/policies/manual-bank details and activate after readiness checks.',{
-   'code':P('Optional legacy one-time code'),'sender_identity':SENDER,'display_name':P('Owner/staff display name'),
+ 'link_identity':S('Register or resume a sandbox merchant from simulator sender context; also accepts legacy staff codes. For every later approved profile, policies, payment or activation write, use the current Desk session_token alone instead of repeating sender identity. Live identity comes from authenticated WhatsApp. Admin may save only merchant-approved profile/policies/manual-bank details and activate after readiness checks.',{
+   'session_token':TOKEN,'code':P('Optional legacy one-time code'),'sender_identity':SENDER,'display_name':P('Owner/staff display name'),
    'business_name':P('Required when registering a new business; derive it directly from the merchant request'),'business_slug':P('Optional storefront identifier; omit to derive it from business_name'),
    'profile':PROFILE,'policies':POLICIES,'manual_bank':MANUAL_BANK,
    'activate_shop':P('Activate tenant Shop after catalogue and payment setup','boolean')}),

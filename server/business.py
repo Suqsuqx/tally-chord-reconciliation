@@ -203,13 +203,23 @@ def _configure_business(c,actor,profile=None,policies=None,manual_bank=None,acti
         audit(c,actor,'business.onboarding_updated',actor['business_id'],{'activated':bool(activate_shop)})
 
 def link_identity(code=None, channel='shop', sender_identity=None, display_name=None, customer_email=None, business_name=None,
-                  business_slug=None, profile=None, policies=None, manual_bank=None, activate_shop=False):
+                  business_slug=None, profile=None, policies=None, manual_bank=None, activate_shop=False,
+                  session_token=None):
     """Legacy code linking plus sandbox sender-routed onboarding.
 
     sender_identity is deliberately accepted only in this sandbox. A live adapter must
     inject the authenticated WhatsApp sender and never accept a typed phone number.
     """
     require(os.getenv('TALLY_ENV','sandbox')=='sandbox','SANDBOX_ONLY','Demo linking is disabled outside sandbox')
+    if session_token:
+        require(channel=='desk','INVALID_INPUT','Session-based onboarding updates belong to Tally Desk')
+        require(not any(value is not None for value in
+                        (code,sender_identity,business_name,business_slug,customer_email)),
+                'INVALID_INPUT','Use either the current Desk session or identity details, not both')
+        with tx() as c:
+            membership=actor_from_token(c,session_token,'desk')
+            _configure_business(c,membership,profile,policies,manual_bank,activate_shop)
+            return _issue_session(c,membership,'resumed')
     if code:
         return _link_identity_code(code,channel)
     identity_hash=_sender_hash(sender_identity)

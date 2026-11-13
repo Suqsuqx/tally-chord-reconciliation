@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 import server.paystack_connections as paystack
 from server.app import app
 from server.business import (ToolFailure, create_order, get_catalog,
-    get_my_order, get_reconciliation_report, link_identity, record_payment_claim,
+    get_my_order, get_reconciliation_report, issue_link_code, link_identity, record_payment_claim,
     update_order_status, upsert_product)
 from server.db import tx
 from server.mcp import process
@@ -111,6 +111,50 @@ def test_serialized_profile_and_policies_are_validated_and_saved():
     assert json.loads(settings["profile_json"])["phone"] == "08012345678"
     assert json.loads(settings["policies_json"])[0]["question"] == (
         "How do customers collect orders?")
+
+
+def test_current_desk_session_saves_approved_profile_and_policies():
+    owner = register_owner()
+    response = process("desk", {
+        "jsonrpc": "2.0", "id": 91, "method": "tools/call",
+        "params": {"name": "link_identity", "arguments": {
+            "session_token": owner["session_token"],
+            "profile": {
+                "category": "Bakery and snacks",
+                "phone": "08012345678",
+                "pickup_address": "1 Herethere, Lagos",
+            },
+            "policies": [
+                {"question": "How are orders fulfilled?", "answer": "Pickup only."},
+            ],
+        }},
+    })
+    result = json.loads(response["result"]["content"][0]["text"])
+    assert response["result"].get("isError") is not True
+    assert result["business_id"] == owner["business_id"]
+    saved = get_catalog(channel="desk", session_token=result["session_token"])
+    assert saved["business_profile"]["phone"] == "08012345678"
+    assert saved["policies"] == [
+        {"question": "How are orders fulfilled?", "answer": "Pickup only."},
+    ]
+
+
+def test_session_onboarding_update_rejects_identity_mixing_and_operator_write():
+    owner = register_owner()
+    with pytest.raises(ToolFailure) as error:
+        link_identity(
+            channel="desk", session_token=owner["session_token"],
+            sender_identity="sim-owner-asyan", profile={"phone": "08012345678"},
+        )
+    assert error.value.code == "INVALID_INPUT"
+
+    operator = link_identity(issue_link_code("staff-tola"), "desk")
+    with pytest.raises(ToolFailure) as error:
+        link_identity(
+            channel="desk", session_token=operator["session_token"],
+            policies=[{"question": "Returns?", "answer": "Contact the owner."}],
+        )
+    assert error.value.code == "FORBIDDEN"
 
 
 def test_serialized_structured_fields_reject_prose_without_partial_write():
