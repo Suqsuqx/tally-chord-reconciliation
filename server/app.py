@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from .db import init_db
 from contextlib import asynccontextmanager
-from .business import seed, ingest_verified_payment, ToolFailure
+from .business import ingest_verified_payment, ToolFailure
 from .mcp import process
 from .paystack_connections import complete_paystack_setup
 from .notion_connections import cancel_notion_oauth, complete_notion_oauth, start_notion_oauth
@@ -46,7 +46,6 @@ async def lifespan(app):
     if os.getenv('TALLY_ENV','sandbox')!='sandbox':
         raise RuntimeError('This release is sandbox-only; production authentication and provider adapters are not implemented')
     init_db()
-    seed()
     yield
 
 app=FastAPI(title='Tally Reconciliation Sandbox',docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
@@ -112,7 +111,10 @@ async def provider_event(request:Request):
     expected='sha256='+hmac.new(secret.encode(),timestamp.encode()+b'.'+raw,hashlib.sha256).hexdigest()
     if not hmac.compare_digest(supplied,expected):return JSONResponse({'error':'Invalid signature'},status_code=401)
     try:
-        result=ingest_verified_payment(json.loads(raw))
+        event=json.loads(raw)
+        if not isinstance(event,dict):
+            raise ToolFailure('INVALID_INPUT','Provider event must be an object')
+        result=ingest_verified_payment(event,business_id=event.get('business_id'))
         return JSONResponse(result)
     except (json.JSONDecodeError,ToolFailure) as ex:
         return JSONResponse({'error':getattr(ex,'code','INVALID_JSON'),'message':str(ex)},status_code=400)

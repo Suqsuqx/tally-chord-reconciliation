@@ -42,7 +42,7 @@ Share each test-only code with the intended simulated actor and redeem with the 
 
 ## Payment event smoke test
 
-After an order is created, invoke `scripts_utility.py sign-event ORDER_ID AMOUNT_IN_KOBO` with `TALLY_WEBHOOK_SECRET` set. It prints timestamp, signature and raw JSON body. Deliver **exactly that body** to `/sandbox/provider-event` with headers `X-Tally-Timestamp`, `X-Tally-Signature` and `Content-Type: application/json`. Do not put webhook secrets in Chord tools or chats. A mismatched event should remain an exception.
+After an order is created, invoke `scripts_utility.py sign-event BUSINESS_ID ORDER_ID AMOUNT_IN_KOBO` with `TALLY_WEBHOOK_SECRET` set. It prints timestamp, signature and raw JSON body. Deliver **exactly that body** to `/sandbox/provider-event` with headers `X-Tally-Timestamp`, `X-Tally-Signature` and `Content-Type: application/json`. Do not put webhook secrets in Chord tools or chats. A mismatched event should remain an exception.
 
 ## Channel
 

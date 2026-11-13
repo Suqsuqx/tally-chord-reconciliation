@@ -7,7 +7,7 @@ Each tool is exposed through **one** of two authenticated public HTTPS endpoints
 | Tool | Private? | Outcome |
 |---|---:|---|
 | `link_identity` | Shop context | Route an unverified simulator sender to an active merchant slug (legacy codes remain for regression tests). |
-| `get_catalog` | Public/session | Tenant-scoped approved profile/policies, products, prices and availability. |
+| `get_catalog` | Active shop/session | Tenant-scoped approved profile/policies, products, prices and availability. There is no default Tally catalogue. |
 | `create_order` | Customer session | Recheck stock, reserve units and return manual-bank instructions or initialize Paystack TEST checkout idempotently. |
 | `get_my_order` | Customer session | Customer-owned order and status only. |
 | `record_payment_claim` | Customer session | Record the claim, then independently verify a mapped Paystack transaction; otherwise remain unverified. |
@@ -34,7 +34,7 @@ When a sandbox Admin registers or resumes through `link_identity` and a provider
 
 ## Provider-only, not an MCP tool
 
-`POST /sandbox/provider-event` validates HMAC-SHA256 of `{timestamp}.{raw body}` and rejects timestamps outside five minutes. It accepts `event_id`, `reference` (order ID), `amount_minor`, `currency=NGN`, `event_status=success`. Replays with the same `event_id` are idempotent. A verified provider event with mismatched data is recorded as an exception, **not** matched to the order. Tool registration credentials cannot access it without the separate provider signing secret.
+`POST /sandbox/provider-event` validates HMAC-SHA256 of `{timestamp}.{raw body}` and rejects timestamps outside five minutes. It accepts an explicit `business_id`, `event_id`, `reference` (order ID), `amount_minor`, `currency=NGN`, and `event_status=success`. It never falls back to a demo tenant. Replays with the same `event_id` are idempotent. A verified provider event with mismatched data is recorded as an exception, **not** matched to the order. Tool registration credentials cannot access it without the separate provider signing secret.
 
 ## Identity gate to verify on Chord
 

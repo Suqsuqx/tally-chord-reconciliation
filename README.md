@@ -9,6 +9,7 @@ This repository is an assessment sandbox, not a production payment or identity s
 ## What is actually implemented
 
 - Additive multi-tenant SQLite schema with conversational sandbox merchant registration, sender-to-business routing and tenant-scoped customers. A registration message creates a new empty business; approved business data and catalogue arrive afterward through chat, files or Notion.
+- Tally starts with no runtime merchant, catalogue or customer-facing business identity. Shop requires an active merchant context; Cedar Bakes exists only as an explicitly seeded regression fixture in isolated tests.
 - Shop and Desk JSON-RPC Streamable HTTP MCP endpoints with distinct bearer authentication and tool allowlists.
 - Server-side Admin/Operator/Customer rules with legacy one-time codes plus explicit **unverified simulator sender routing**. The live contract remains authenticated WhatsApp-number identity; typed numbers are never authorization.
 - Stock reservation, idempotent order creation, signed sandbox payment events (not customer-visible MCP), reconciliation report, merchant catch-up, low-stock alerts, order status and case-specific customer support.

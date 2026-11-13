@@ -33,6 +33,7 @@ def require(cond, code, message):
         raise ToolFailure(code, message)
 
 def seed():
+    """Create the isolated Cedar regression fixture used by tests only."""
     with tx() as c:
         c.execute('INSERT OR IGNORE INTO businesses VALUES(?,?,?)', (BUSINESS_ID, 'Cedar Bakes (sandbox)', 'NGN'))
         timestamp=now()
@@ -101,6 +102,7 @@ def _issue_session(c,actor,registration_status='resumed'):
 
 def _validate_profile(profile):
     if profile is None:return None
+    profile=_decode_structured_argument(profile,dict,'Business profile must be a JSON object')
     require(isinstance(profile,dict) and len(profile)<=30,'INVALID_INPUT','Business profile must be an object')
     clean={}
     for key,value in profile.items():
@@ -111,6 +113,7 @@ def _validate_profile(profile):
 
 def _validate_policies(policies):
     if policies is None:return None
+    policies=_decode_structured_argument(policies,list,'Policies must be a JSON list')
     require(isinstance(policies,list) and len(policies)<=50,'INVALID_INPUT','Policies must be a list')
     clean=[]
     for item in policies:
@@ -118,6 +121,16 @@ def _validate_policies(policies):
                 isinstance(item.get('answer'),str),'INVALID_INPUT','Each policy needs question and answer')
         clean.append({'question':item['question'].strip()[:300],'answer':item['answer'].strip()[:2000]})
     return clean
+
+def _decode_structured_argument(value,expected_type,message):
+    """Accept JSON containers serialized by chat tool transports, without accepting prose."""
+    if isinstance(value,str):
+        try:
+            value=json.loads(value)
+        except (TypeError,ValueError):
+            raise ToolFailure('INVALID_INPUT',message)
+    require(isinstance(value,expected_type),'INVALID_INPUT',message)
+    return value
 
 def _configure_business(c,actor,profile=None,policies=None,manual_bank=None,activate_shop=False):
     require(actor['role']=='admin','FORBIDDEN','Only an admin may change onboarding settings')
@@ -132,6 +145,8 @@ def _configure_business(c,actor,profile=None,policies=None,manual_bank=None,acti
         c.execute('UPDATE business_settings SET policies_json=?,updated_at=? WHERE business_id=?',
                   (json.dumps(policies_value),now(),actor['business_id']))
     if manual_bank is not None:
+        manual_bank=_decode_structured_argument(
+            manual_bank,dict,'Manual bank setup must be a JSON object')
         require(isinstance(manual_bank,dict),'INVALID_INPUT','Manual bank setup must be an object')
         bank_name=str(manual_bank.get('bank_name','')).strip()
         account_name=str(manual_bank.get('account_name','')).strip()
@@ -234,6 +249,10 @@ def actor_from_token(conn, token, channel):
     require(a is not None,'UNAUTHORIZED','Session expired or invalid. Link your identity again')
     require((channel=='shop' and a['kind']=='customer') or (channel=='desk' and a['kind']=='staff'),
             'FORBIDDEN','This session cannot use these tools')
+    if channel=='shop':
+        active=conn.execute("""SELECT 1 FROM business_settings WHERE business_id=?
+                               AND onboarding_status='active'""",(a['business_id'],)).fetchone()
+        require(active is not None,'SHOP_UNAVAILABLE','This shop is not active')
     return a
 
 def require_role(actor,role):
@@ -251,7 +270,9 @@ def get_catalog(channel='shop',session_token=None,shop_slug=None,notion_resource
             require(settings is not None,'SHOP_UNAVAILABLE','This shop is not active')
             business_id=settings['business_id']
         else:
-            business_id=BUSINESS_ID
+            raise ToolFailure(
+                'SHOP_CONTEXT_REQUIRED',
+                'Select an active merchant shop before requesting its catalogue')
         business=c.execute('SELECT * FROM businesses WHERE id=?',(business_id,)).fetchone()
         require(business is not None,'NOT_FOUND','Business not found')
         settings=c.execute('SELECT * FROM business_settings WHERE business_id=?',(business_id,)).fetchone()
@@ -398,7 +419,9 @@ def record_payment_claim(session_token,order_id,note='Customer reports transfer'
     result['provider_check_status']=verified.get('status') if verified else 'not_connected'
     return result
 
-def ingest_verified_payment(event,business_id=BUSINESS_ID):
+def ingest_verified_payment(event,business_id=None):
+    require(isinstance(business_id,str) and business_id.strip(),
+            'INVALID_INPUT','A business is required for payment reconciliation')
     require(event.get('event_status')=='success','INVALID_PAYMENT','Only successful provider events may settle orders')
     require(isinstance(event.get('event_id'),str) and isinstance(event.get('reference'),str),'INVALID_INPUT','Missing event id or reference')
     require(isinstance(event.get('amount_minor'),int) and event['amount_minor']>0,'INVALID_INPUT','Invalid amount')

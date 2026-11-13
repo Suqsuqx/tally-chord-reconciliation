@@ -58,6 +58,49 @@ def test_conversational_registration_creates_empty_business():
         assert conn.execute("SELECT name FROM businesses WHERE id=?", (BUSINESS_ID,)).fetchone()[0] == "Cedar Bakes (sandbox)"
 
 
+def test_serialized_profile_and_policies_are_validated_and_saved():
+    owner = register_owner()
+    resumed = link_identity(
+        channel="desk", sender_identity="sim-owner-asyan", business_slug="asyan-shop",
+        profile=json.dumps({
+            "description": "A neighborhood bakery",
+            "phone": "08012345678",
+            "pickup_address": "1 Herethere Street, Lagos",
+        }),
+        policies=json.dumps([
+            {"question": "How do customers collect orders?",
+             "answer": "Pickup is available in Lagos."},
+        ]),
+    )
+    assert resumed["business_id"] == owner["business_id"]
+    with tx() as conn:
+        settings = conn.execute(
+            "SELECT profile_json,policies_json FROM business_settings WHERE business_id=?",
+            (owner["business_id"],),
+        ).fetchone()
+    assert json.loads(settings["profile_json"])["phone"] == "08012345678"
+    assert json.loads(settings["policies_json"])[0]["question"] == (
+        "How do customers collect orders?")
+
+
+def test_serialized_structured_fields_reject_prose_without_partial_write():
+    owner = register_owner()
+    with pytest.raises(ToolFailure) as error:
+        link_identity(
+            channel="desk", sender_identity="sim-owner-asyan", business_slug="asyan-shop",
+            profile="phone is 08012345678",
+            policies=json.dumps([{"question": "Returns?", "answer": "Contact us."}]),
+        )
+    assert error.value.code == "INVALID_INPUT"
+    with tx() as conn:
+        settings = conn.execute(
+            "SELECT profile_json,policies_json FROM business_settings WHERE business_id=?",
+            (owner["business_id"],),
+        ).fetchone()
+    assert json.loads(settings["profile_json"]) == {}
+    assert json.loads(settings["policies_json"]) == []
+
+
 def test_prompt_only_registration_returns_both_secure_provider_links(monkeypatch):
     monkeypatch.setenv("TALLY_NOTION_CONNECTIONS_ENABLED", "true")
     monkeypatch.setenv("NOTION_CLIENT_ID", "notion-test-client")
@@ -88,6 +131,10 @@ def test_manual_bank_shop_activation_customer_order_claim_and_admin_confirmation
         manual_bank={"bank_name": "Sandbox Bank", "account_name": "ASYAN SHOP TEST",
                      "account_number": "0123456789"}, activate_shop=True,
     )
+    launched = get_catalog(channel="desk", session_token=owner["session_token"])
+    assert launched["onboarding"]["status"] == "active"
+    assert launched["business_profile"] == {}
+    assert launched["policies"] == []
     customer = link_identity(channel="shop", sender_identity="sim-customer-one",
                              display_name="Test customer", business_slug="asyan-shop")
     order = create_order(customer["session_token"],
@@ -118,6 +165,24 @@ def test_inactive_or_wrong_shop_context_is_rejected():
     assert error.value.code == "SHOP_UNAVAILABLE"
     with pytest.raises(ToolFailure):
         link_identity(channel="shop", sender_identity="sim-customer-one", business_slug="another-shop")
+
+
+def test_existing_customer_session_stops_when_shop_is_deactivated():
+    owner = register_owner(
+        manual_bank={"bank_name": "Sandbox Bank", "account_name": "ASYAN SHOP TEST",
+                     "account_number": "0123456789"},
+    )
+    upsert_product(owner["session_token"], "Brownie box", 650000, 5, 3)
+    link_identity(channel="desk", sender_identity="sim-owner-asyan",
+                  business_slug="asyan-shop", activate_shop=True)
+    customer = link_identity(channel="shop", sender_identity="sim-customer-one",
+                             business_slug="asyan-shop")
+    with tx() as conn:
+        conn.execute("UPDATE business_settings SET onboarding_status='archived' WHERE business_id=?",
+                     (owner["business_id"],))
+    with pytest.raises(ToolFailure) as error:
+        get_catalog(channel="shop", session_token=customer["session_token"])
+    assert error.value.code == "SHOP_UNAVAILABLE"
 
 
 async def fake_write_verify(_key):
