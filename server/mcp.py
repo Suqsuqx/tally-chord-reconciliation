@@ -73,21 +73,30 @@ def _attach_admin_setup_links(channel,name,result):
     if channel!='desk' or name!='link_identity' or not isinstance(result,dict) or result.get('role')!='admin':
         return result
     session_token=result.get('session_token')
+    integrations=result.get('integrations') or {}
     links={}
     if os.getenv('TALLY_PAYSTACK_CONNECTIONS_ENABLED','false').lower()=='true':
-        from .paystack_connections import issue_paystack_setup_link
-        try:
-            links['paystack']=issue_paystack_setup_link(session_token)
-        except ToolFailure as ex:
-            reference=_log_tool_failure(channel,'issue_paystack_setup_link',ex.code)
-            links['paystack']={'status':'unavailable','error':ex.code,'support_reference':reference}
+        if (integrations.get('paystack') or {}).get('connection_status')=='connected':
+            links['paystack']={'status':'connected'}
+        else:
+            from .paystack_connections import issue_paystack_setup_link
+            try:
+                links['paystack']=issue_paystack_setup_link(session_token)
+            except ToolFailure as ex:
+                reference=_log_tool_failure(channel,'issue_paystack_setup_link',ex.code)
+                links['paystack']={'status':'unavailable','error':ex.code,'support_reference':reference}
     if os.getenv('TALLY_NOTION_CONNECTIONS_ENABLED','false').lower()=='true':
-        from .notion_connections import issue_notion_setup_link
-        try:
-            links['notion']=issue_notion_setup_link(session_token)
-        except ToolFailure as ex:
-            reference=_log_tool_failure(channel,'issue_notion_setup_link',ex.code)
-            links['notion']={'status':'unavailable','error':ex.code,'support_reference':reference}
+        notion=integrations.get('notion') or {}
+        if notion.get('connection_status')=='connected' and notion.get('workspace_status')=='active':
+            links['notion']={'status':'connected','workspace_status':'active',
+                             'managed_sections':notion.get('managed_sections',5)}
+        else:
+            from .notion_connections import issue_notion_setup_link
+            try:
+                links['notion']=issue_notion_setup_link(session_token)
+            except ToolFailure as ex:
+                reference=_log_tool_failure(channel,'issue_notion_setup_link',ex.code)
+                links['notion']={'status':'unavailable','error':ex.code,'support_reference':reference}
     if links:
         result=dict(result)
         result['provider_setup']=links

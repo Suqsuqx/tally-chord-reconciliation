@@ -74,6 +74,22 @@ def _customer_name(value):
     require(1<=len(name)<=160,'INVALID_INPUT','Provide a valid customer name')
     return name
 
+def _integration_status(c,business_id):
+    connections={row['provider']:row for row in c.execute(
+        """SELECT provider,status,environment FROM provider_connections
+           WHERE business_id=? AND status='active'""",(business_id,)).fetchall()}
+    workspace=c.execute("SELECT parent_page_id FROM notion_workspaces WHERE business_id=?",
+                        (business_id,)).fetchone()
+    notion_connected='notion' in connections
+    paystack_connected='paystack' in connections
+    notion={'connection_status':'connected' if notion_connected else 'not_connected',
+            'workspace_status':'active' if workspace else ('pending' if notion_connected else 'not_configured')}
+    if workspace:
+        notion['workspace_url']='https://www.notion.so/'+workspace['parent_page_id'].replace('-','')
+        notion['managed_sections']=5
+    return {'notion':notion,
+            'paystack':{'connection_status':'connected' if paystack_connected else 'not_connected'}}
+
 def _issue_session(c,actor,registration_status='resumed'):
     session=secrets.token_urlsafe(32)
     expires=(datetime.now(timezone.utc)+timedelta(hours=2)).isoformat()
@@ -92,6 +108,8 @@ def _issue_session(c,actor,registration_status='resumed'):
             'expires_at':expires,
             'identity_assurance':'unverified_simulator' if actor['id'].startswith(('own-','cus-')) else 'sandbox_code',
             'note':'Sandbox routing only. The live product must derive identity from the authenticated WhatsApp sender.'}
+    if actor['kind']=='staff':
+        result['integrations']=_integration_status(c,actor['business_id'])
     if actor['kind']=='customer':
         saved_name=actor['display_name'] if actor['display_name']!='Customer' else None
         result['customer_profile']={
@@ -354,6 +372,7 @@ def get_catalog(channel='shop',session_token=None,shop_slug=None,notion_resource
             policies=result['policies']
             result['onboarding']={'status':settings['onboarding_status'],
                                   'payment_method':settings['payment_method'],
+                                  'integrations':_integration_status(c,business_id),
                                   'notion_resources':[rowdict(row) for row in resources],
                                   'sections':{
                                       'business_profile':{'status':'saved' if profile else 'not_started',

@@ -399,3 +399,41 @@ def test_linking_consent_selects_root_creates_workspace_and_backfills_current_da
         assert conn.execute(
             "SELECT COUNT(*) FROM notion_records WHERE record_type='support_case'"
         ).fetchone()[0] == 1
+
+
+def test_connected_workspace_returns_status_instead_of_another_setup_link():
+    connect_notion()
+    page_number = 0
+
+    def requester(method, path, _body):
+        nonlocal page_number
+        if method == "POST" and path == "/pages":
+            page_number += 1
+            return {"id": f"status-notion-page-{page_number}"}
+        if method == "PATCH" and path.startswith("/blocks/"):
+            return {"object": "list", "results": []}
+        raise AssertionError((method, path))
+
+    initialize_notion_workspace_for_business(
+        DEMO_BUSINESS_ID, "page-asyan-profile", requester=requester, backfill=False)
+    code = issue_link_code("staff-eni")
+    linked = process("desk", {
+        "jsonrpc": "2.0", "id": 31, "method": "tools/call",
+        "params": {"name": "link_identity", "arguments": {"code": code}},
+    })
+    result = json.loads(linked["result"]["content"][0]["text"])
+    assert result["integrations"]["notion"]["connection_status"] == "connected"
+    assert result["integrations"]["notion"]["workspace_status"] == "active"
+    assert result["provider_setup"]["notion"] == {
+        "status": "connected", "workspace_status": "active", "managed_sections": 5,
+    }
+    assert "setup_url" not in result["provider_setup"]["notion"]
+
+    catalog = process("desk", {
+        "jsonrpc": "2.0", "id": 32, "method": "tools/call",
+        "params": {"name": "get_catalog", "arguments": {
+            "session_token": result["session_token"],
+        }},
+    })
+    catalog_result = json.loads(catalog["result"]["content"][0]["text"])
+    assert catalog_result["onboarding"]["integrations"]["notion"]["workspace_status"] == "active"
