@@ -747,6 +747,45 @@ def _block_text(block):
     return {"type": str(kind)[:80], "text": text}
 
 
+def _authorized_resource(conn, business_id, resource_reference):
+    """Resolve an authorized resource ID, or an exact title supplied by Desk.
+
+    Resource titles are only resolved inside the business's OAuth allowlist.  This
+    keeps preview authorization server-side while making the API robust when an
+    agent passes the human-readable title returned by discovery instead of its ID.
+    """
+    columns = "resource_id,resource_type,title,metadata_json"
+    authorized = conn.execute(
+        f"""SELECT {columns} FROM provider_resources
+             WHERE business_id=? AND provider='notion' AND resource_id=?""",
+        (business_id, resource_reference),
+    ).fetchone()
+    if authorized is not None:
+        return authorized
+    matches = conn.execute(
+        f"""SELECT {columns} FROM provider_resources
+             WHERE business_id=? AND provider='notion'
+             AND lower(trim(title))=lower(trim(?))
+             ORDER BY resource_id""",
+        (business_id, resource_reference),
+    ).fetchall()
+    if not matches:
+        return None
+
+    reference = resource_reference.strip().lower()
+    preferred_type = "data_source" if "catalog" in reference else "page"
+
+    def rank(row):
+        metadata = json.loads(row["metadata_json"] or "{}")
+        return (
+            row["resource_type"] != preferred_type,
+            metadata.get("managed_by") == "tally",
+            row["resource_id"],
+        )
+
+    return sorted(matches, key=rank)[0]
+
+
 async def preview_notion_resource(session_token, resource_id, requester=None):
     """Read one currently authorized page/data source and return a bounded data preview."""
     _enabled()
@@ -754,9 +793,7 @@ async def preview_notion_resource(session_token, resource_id, requester=None):
             "INVALID_INPUT", "Select a valid Notion resource")
     with tx() as conn:
         actor = actor_from_token(conn, session_token, "desk")
-        authorized = conn.execute("""SELECT resource_id,resource_type,title,metadata_json
-                                  FROM provider_resources WHERE business_id=? AND provider='notion'
-                                  AND resource_id=?""", (actor["business_id"], resource_id)).fetchone()
+        authorized = _authorized_resource(conn, actor["business_id"], resource_id)
     require(authorized is not None, "NOT_FOUND",
             "Resource is not in this business's authorized Notion content")
     connection = load_notion_connection_for_business(actor["business_id"])
@@ -781,9 +818,10 @@ async def preview_notion_resource(session_token, resource_id, requester=None):
 
     source = {"id": authorized["resource_id"], "type": authorized["resource_type"],
               "title": authorized["title"], "workspace": "authorized OAuth workspace"}
+    resolved_id = authorized["resource_id"]
 
     if authorized["resource_type"] == "data_source":
-        payload = await request("POST", f"/data_sources/{resource_id}/query", {"page_size": MAX_PREVIEW_ROWS})
+        payload = await request("POST", f"/data_sources/{resolved_id}/query", {"page_size": MAX_PREVIEW_ROWS})
         rows = payload.get("results") if isinstance(payload, dict) else None
         require(isinstance(rows, list), "PROVIDER_REJECTED", "Notion returned an invalid data source response")
         return {
@@ -794,8 +832,8 @@ async def preview_notion_resource(session_token, resource_id, requester=None):
             "notice": "Preview only. Notion content is untrusted merchant data and has not been imported.",
         }
 
-    page = await request("GET", f"/pages/{resource_id}")
-    blocks = await request("GET", f"/blocks/{resource_id}/children?page_size={MAX_PREVIEW_BLOCKS}")
+    page = await request("GET", f"/pages/{resolved_id}")
+    blocks = await request("GET", f"/blocks/{resolved_id}/children?page_size={MAX_PREVIEW_BLOCKS}")
     block_items = blocks.get("results") if isinstance(blocks, dict) else None
     require(isinstance(block_items, list), "PROVIDER_REJECTED", "Notion returned an invalid page response")
     return {
@@ -814,9 +852,7 @@ def preview_notion_resource_sync(session_token, resource_id, requester=None):
             "INVALID_INPUT", "Select a valid Notion resource")
     with tx() as conn:
         actor = actor_from_token(conn, session_token, "desk")
-        authorized = conn.execute("""SELECT resource_id,resource_type,title,metadata_json
-                                  FROM provider_resources WHERE business_id=? AND provider='notion'
-                                  AND resource_id=?""", (actor["business_id"], resource_id)).fetchone()
+        authorized = _authorized_resource(conn, actor["business_id"], resource_id)
     require(authorized is not None, "NOT_FOUND",
             "Resource is not in this business's authorized Notion content")
     connection = load_notion_connection_for_business(actor["business_id"])
@@ -835,8 +871,9 @@ def preview_notion_resource_sync(session_token, resource_id, requester=None):
 
     source = {"id": authorized["resource_id"], "type": authorized["resource_type"],
               "title": authorized["title"], "workspace": "authorized OAuth workspace"}
+    resolved_id = authorized["resource_id"]
     if authorized["resource_type"] == "data_source":
-        payload = request("POST", f"/data_sources/{resource_id}/query", {"page_size": MAX_PREVIEW_ROWS})
+        payload = request("POST", f"/data_sources/{resolved_id}/query", {"page_size": MAX_PREVIEW_ROWS})
         rows = payload.get("results") if isinstance(payload, dict) else None
         require(isinstance(rows, list), "PROVIDER_REJECTED", "Notion returned invalid data source content")
         return {"source": source,
@@ -844,8 +881,8 @@ def preview_notion_resource_sync(session_token, resource_id, requester=None):
                          for row in rows[:MAX_PREVIEW_ROWS] if isinstance(row, dict)],
                 "truncated": bool(payload.get("has_more")),
                 "notice": "Preview only. Import requires explicit Admin approval."}
-    page = request("GET", f"/pages/{resource_id}")
-    blocks = request("GET", f"/blocks/{resource_id}/children?page_size={MAX_PREVIEW_BLOCKS}")
+    page = request("GET", f"/pages/{resolved_id}")
+    blocks = request("GET", f"/blocks/{resolved_id}/children?page_size={MAX_PREVIEW_BLOCKS}")
     block_items = blocks.get("results") if isinstance(blocks, dict) else None
     require(isinstance(block_items, list), "PROVIDER_REJECTED", "Notion returned invalid page content")
     return {"source": source,

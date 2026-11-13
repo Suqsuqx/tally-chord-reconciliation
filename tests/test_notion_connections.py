@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.app import app
-from server.business import (ToolFailure, create_support_case, issue_link_code, link_identity,
+from server.business import (ToolFailure, create_support_case, get_catalog, issue_link_code, link_identity,
     upsert_product)
 from server.db import tx
 from server.notion_connections import (cancel_notion_oauth, complete_notion_oauth, discover_authorized_resources,
@@ -222,10 +222,48 @@ def test_data_source_preview_extracts_only_bounded_supported_properties():
         raise AssertionError(path)
 
     result = asyncio.run(preview_notion_resource(
-        desk_session(), "data-source-catalogue", requester=requester
+        desk_session(), "Catalogue", requester=requester
     ))
     assert result["rows"][0]["properties"] == {"Product": "Chocolate cupcake", "Price": 2500}
     assert "Hidden relation" not in result["rows"][0]["properties"]
+
+
+def test_get_catalog_auto_previews_canonical_merchant_notion_sources(monkeypatch):
+    async def merchant_discovery(_access_token):
+        return {"resources": [
+            {"id": "page-business-profile", "type": "page", "title": "Business Profile"},
+            {"id": "data-source-catalogue", "type": "data_source", "title": "Catalogue"},
+            {"id": "page-policies-faqs", "type": "page", "title": "Policies & FAQs"},
+            {"id": "page-generated-catalogue", "type": "page",
+             "title": "ASYAN SHOP — Catalogue"},
+        ], "truncated": False}
+
+    _token, state = oauth_state()
+    asyncio.run(complete_notion_oauth(
+        "merchant-authorization", state, exchanger=fake_exchange,
+        discoverer=merchant_discovery,
+    ))
+    with tx() as conn:
+        conn.execute("DELETE FROM products WHERE business_id=?", (DEMO_BUSINESS_ID,))
+        conn.execute("UPDATE business_settings SET profile_json='{}',policies_json='[]' WHERE business_id=?",
+                     (DEMO_BUSINESS_ID,))
+
+    previewed = []
+
+    def fake_preview(_session_token, resource_id, requester=None):
+        previewed.append(resource_id)
+        return {"source": {"id": resource_id, "title": resource_id}, "content": []}
+
+    monkeypatch.setattr("server.notion_connections.preview_notion_resource_sync", fake_preview)
+    result = get_catalog(channel="desk", session_token=desk_session())
+
+    assert previewed == [
+        "page-business-profile", "data-source-catalogue", "page-policies-faqs",
+    ]
+    assert [preview["section"] for preview in result["notion_import_previews"]] == [
+        "business_profile", "catalogue", "policies",
+    ]
+    assert "metadata_json" not in result["onboarding"]["notion_resources"][0]
 
 
 def test_discovery_includes_readable_direct_child_pages_and_data_sources():

@@ -337,7 +337,43 @@ def resolve_shop_entry(shop_slug,bound_shop_slug=None):
 def require_role(actor,role):
     require(actor['role']==role,'FORBIDDEN',f'Only a {role} may perform this action')
 
+def _preferred_notion_import_resources(resources,need_profile,need_catalogue,need_policies):
+    """Choose canonical merchant-authored onboarding sources deterministically."""
+    rows=[rowdict(row) for row in resources]
+    definitions=(
+        ('business_profile',need_profile,('business profile',),'page'),
+        ('catalogue',need_catalogue,('catalogue','catalog'),'data_source'),
+        ('policies',need_policies,('policies & faqs','policies and faqs','policies & faq','policies'),'page'),
+    )
+    selected=[]
+    used=set()
+    for section,needed,titles,preferred_type in definitions:
+        if not needed:
+            continue
+        candidates=[]
+        for resource in rows:
+            if resource['resource_id'] in used:
+                continue
+            normalized=' '.join(str(resource['title'] or '').strip().lower().split())
+            exact=next((index for index,title in enumerate(titles) if normalized==title),None)
+            contains=any(title in normalized for title in titles)
+            if exact is None and not contains:
+                continue
+            metadata=json.loads(resource.get('metadata_json') or '{}')
+            candidates.append(((exact is None,exact if exact is not None else len(titles),
+                                resource['resource_type']!=preferred_type,
+                                metadata.get('managed_by')=='tally',len(normalized),
+                                resource['resource_id']),resource))
+        if not candidates:
+            continue
+        chosen=min(candidates,key=lambda item:item[0])[1]
+        used.add(chosen['resource_id'])
+        selected.append({'section':section,'resource_id':chosen['resource_id'],
+                         'resource_type':chosen['resource_type'],'title':chosen['title']})
+    return selected
+
 def get_catalog(channel='shop',session_token=None,shop_slug=None,notion_resource_id=None):
+    auto_notion_resources=[]
     with tx() as c:
         if channel=='desk':
             actor=actor_from_token(c,session_token,channel);business_id=actor['business_id']
@@ -366,14 +402,16 @@ def get_catalog(channel='shop',session_token=None,shop_slug=None,notion_resource
             result['policies']=json.loads(settings['policies_json'] or '[]')
             result['checkout']={'method':settings['payment_method']}
         if channel=='desk' and settings:
-            resources=c.execute('''SELECT resource_id,resource_type,title FROM provider_resources
+            resources=c.execute('''SELECT resource_id,resource_type,title,metadata_json FROM provider_resources
                                    WHERE business_id=? AND provider='notion' ORDER BY title''',(business_id,)).fetchall()
             profile=result['business_profile']
             policies=result['policies']
             result['onboarding']={'status':settings['onboarding_status'],
                                   'payment_method':settings['payment_method'],
                                   'integrations':_integration_status(c,business_id),
-                                  'notion_resources':[rowdict(row) for row in resources],
+                                  'notion_resources':[
+                                      {key:row[key] for key in ('resource_id','resource_type','title')}
+                                      for row in resources],
                                   'sections':{
                                       'business_profile':{'status':'saved' if profile else 'not_started',
                                                           'recommended':True},
@@ -386,9 +424,28 @@ def get_catalog(channel='shop',session_token=None,shop_slug=None,notion_resource
                                                  'required_for_activation':True},
                                   },
                                   'activation_ready':bool(products and settings['payment_method'])}
+            notion_status=result['onboarding']['integrations']['notion']
+            if (not notion_resource_id and notion_status['connection_status']=='connected'):
+                auto_notion_resources=_preferred_notion_import_resources(
+                    resources,not profile,not products,not policies)
     if channel=='desk' and notion_resource_id:
         from .notion_connections import preview_notion_resource_sync
         result['notion_preview']=preview_notion_resource_sync(session_token,notion_resource_id)
+    elif channel=='desk' and auto_notion_resources:
+        from .notion_connections import preview_notion_resource_sync
+        previews=[]
+        preview_errors=[]
+        for resource in auto_notion_resources:
+            try:
+                preview=preview_notion_resource_sync(session_token,resource['resource_id'])
+                preview['section']=resource['section']
+                previews.append(preview)
+            except (ToolFailure,ValueError) as error:
+                preview_errors.append({'section':resource['section'],
+                                       'code':getattr(error,'code','PROVIDER_UNAVAILABLE')})
+        result['notion_import_previews']=previews
+        if preview_errors:
+            result['notion_preview_errors']=preview_errors
     return result
 
 def upsert_product(session_token,name,price_minor,stock_on_hand,low_stock_threshold=3):
