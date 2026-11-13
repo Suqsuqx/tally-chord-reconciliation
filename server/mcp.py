@@ -13,11 +13,16 @@ POLICIES={'type':'array','items':{'type':'object','properties':{'question':P('Po
 MANUAL_BANK={'type':'object','properties':{'bank_name':P('Bank name'),'account_name':P('Account name'),'account_number':P('Account number')},'required':['bank_name','account_name','account_number'],'additionalProperties':False}
 NOTION_WORKSPACE={'type':'object','description':'Admin-approved Notion parent page where Tally may create and maintain the merchant workspace.','properties':{'parent_page_id':P('Authorized blank or existing Notion page ID'),'approved':P('Must be true after the Admin approves Tally creating its workspace','boolean')},'required':['parent_page_id','approved'],'additionalProperties':False}
 SHOP={
- 'link_identity':S('Route a sandbox customer into the one active merchant bound to this Shop instance using simulator sender context. The server supplies business context; customers cannot select a merchant. Never display the returned session token.',{'sender_identity':SENDER,'display_name':P('Customer display name')}),
+ 'link_identity':S('Route a customer into the one active merchant bound to this Shop instance and remember customer details against the authenticated channel identity. The server supplies business context; customers cannot select a merchant. Never display the returned session token.',{
+     'sender_identity':SENDER,'display_name':P('Customer name, supplied by the customer'),
+     'customer_email':P('Optional customer email to remember for Paystack checkout')}),
  'get_catalog':S('Current bound-tenant prices and availability from SQL, not knowledge files. Requires the server-bound active Shop or a customer session from it; there is no model-selected merchant.',{'session_token':TOKEN}),
  'create_order':S('Create order for linked customer; server rechecks stock and calculates total. Reuse request_id on retries.',
-       {'session_token':TOKEN,'items':{'type':'array','items':{'type':'object','properties':{'product_id':P('Catalog item ID'),'quantity':P('Positive quantity','integer')},'required':['product_id','quantity']}},'request_id':P('Unique idempotency key stable for retry'),'payment_email':P('Customer email required only for hosted Paystack checkout')},['session_token','items','request_id']),
- 'get_my_order':S('Get order only if owned by linked customer.',{'session_token':TOKEN,'order_id':P('Order reference')},['session_token','order_id']),
+       {'session_token':TOKEN,'items':{'type':'array','items':{'type':'object','properties':{'product_id':P('Catalog item ID'),'quantity':P('Positive quantity','integer')},'required':['product_id','quantity']}},'request_id':P('Unique idempotency key stable for retry'),'payment_email':P('Customer email needed only when Paystack is configured and no email is already remembered')},['session_token','items','request_id']),
+ 'get_my_order':S('Get a customer-owned order. If the customer explicitly confirms receipt, promote the paid order to fulfilled, resolve the merchant delivery request and audit skipped offline stages.',{
+     'session_token':TOKEN,'order_id':P('Order reference'),
+     'confirm_received':P('True only when the customer explicitly says the order was received','boolean'),
+     'confirmation_note':P('Optional short customer wording confirming receipt')},['session_token','order_id']),
  'record_payment_claim':S('Record unverified customer claim; NEVER confirms payment.',{'session_token':TOKEN,'order_id':P('Order reference'),'note':P('Customer wording')},['session_token','order_id']),
  'create_support_case':S('Escalate complaint or uncertain question to staff queue.',{'session_token':TOKEN,'category':{'type':'string','enum':['complaint','inquiry']},'message':P('Customer issue'),'order_id':P('Optional customer order reference')},['session_token','category','message']),
  'get_my_support_case':S('Read one customer-owned case and recorded staff reply.',{'session_token':TOKEN,'case_id':P('Case reference')},['session_token','case_id']),
@@ -34,9 +39,9 @@ DESK={
    'stock_on_hand':P('Physical units on hand','integer'),'low_stock_threshold':P('Low stock warning threshold','integer')},
    ['session_token','name','price_minor','stock_on_hand']),
  'get_order_queue':S('Merchant-scoped order queue.',{'session_token':TOKEN},['session_token']),
- 'update_order_status':S('Advance paid fulfilment. Admin may use confirmed only for audited manual-bank receipt confirmation; provider payments cannot be manually confirmed.',{
-    'session_token':TOKEN,'order_id':P('Order ID'),'new_status':{'type':'string','enum':['confirmed','preparing','dispatched','fulfilled']},
-    'confirmation_note':P('Required evidence note for Admin manual-bank confirmation')},['session_token','order_id','new_status']),
+ 'update_order_status':S('Record forward progress for a paid order, including direct jumps when work happened offline. delivery_reported queues customer confirmation; fulfilled requires a recorded customer confirmation. Admin may use confirmed only for audited manual-bank receipt confirmation.',{
+    'session_token':TOKEN,'order_id':P('Order ID'),'new_status':{'type':'string','enum':['confirmed','preparing','dispatched','delivery_reported','fulfilled']},
+    'confirmation_note':P('Evidence note for manual payment or merchant-recorded customer confirmation')},['session_token','order_id','new_status']),
  'get_reconciliation_report':S('Compute matched verified transfers, payment mismatches, unmatched credits and unpaid orders from the ledger.',{'session_token':TOKEN},['session_token']),
  'get_merchant_catchup':S('Merchant catch-up since supplied timestamp or previous 24h: recent activity, reconciliation, inventory alerts, support exceptions.',{'session_token':TOKEN,'since':P('Optional ISO-8601 timestamp with timezone, e.g. 2026-11-04T08:00:00+01:00')},['session_token']),
  'get_inventory_alerts':S('Low stock and sold-out items from real on-hand minus reserved quantity.',{'session_token':TOKEN},['session_token']),
@@ -92,7 +97,8 @@ def _sync_approved_notion_data(channel,name,args,result):
         elif channel=='desk' and name=='upsert_product':
             from .notion_connections import sync_product_snapshot
             sync_result=sync_product_snapshot(args.get('session_token'),result.get('product_id'))
-        elif name in ('create_order','record_payment_claim','update_order_status') and result.get('order_id'):
+        elif ((name in ('create_order','record_payment_claim','update_order_status') or
+               (name=='get_my_order' and result.get('recorded_from'))) and result.get('order_id')):
             from .notion_connections import sync_order_snapshot
             sync_result=sync_order_snapshot(result['order_id'])
     except ToolFailure as ex:

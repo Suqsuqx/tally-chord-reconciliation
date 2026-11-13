@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS channel_identities (
 CREATE TABLE IF NOT EXISTS actors (
  id TEXT PRIMARY KEY, business_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('customer','staff')),
  role TEXT NOT NULL CHECK(role IN ('customer','admin','operator')), display_name TEXT NOT NULL,
+ email TEXT,
  active INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS access_codes (
@@ -75,6 +76,13 @@ CREATE TABLE IF NOT EXISTS support_messages (
  id TEXT PRIMARY KEY, case_id TEXT NOT NULL, sender_actor_id TEXT NOT NULL,
  sender_kind TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS customer_notifications (
+ id TEXT PRIMARY KEY, business_id TEXT NOT NULL, customer_id TEXT NOT NULL,
+ order_id TEXT NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, resolved_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS customer_notification_per_order
+ ON customer_notifications(customer_id,order_id,kind);
 CREATE TABLE IF NOT EXISTS audit (
  id TEXT PRIMARY KEY, business_id TEXT NOT NULL, actor_id TEXT NOT NULL,
  action TEXT NOT NULL, target_id TEXT, detail TEXT NOT NULL, created_at TEXT NOT NULL
@@ -142,6 +150,9 @@ def init_db():
         ):
             if name not in existing:
                 conn.execute(f'ALTER TABLE payment_provider_references ADD COLUMN {name} {declaration}')
+        actor_columns = {row[1] for row in conn.execute('PRAGMA table_info(actors)')}
+        if 'email' not in actor_columns:
+            conn.execute('ALTER TABLE actors ADD COLUMN email TEXT')
 
 @contextmanager
 def tx():

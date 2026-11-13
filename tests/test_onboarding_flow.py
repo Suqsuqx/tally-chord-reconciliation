@@ -257,6 +257,35 @@ def test_bound_shop_mcp_injects_one_business_and_rejects_store_switch(monkeypatc
     assert mismatch["error"] == "SHOP_CONTEXT_MISMATCH"
 
 
+def test_shop_remembers_customer_name_and_exposes_it_on_merchant_orders():
+    owner = register_owner(
+        manual_bank={"bank_name": "Sandbox Bank", "account_name": "ASYAN SHOP",
+                     "account_number": "0123456789"},
+    )
+    upsert_product(owner["session_token"], "Brownie box", 650000, 5, 2)
+    owner = link_identity(channel="desk", sender_identity="sim-owner-asyan",
+                          business_slug="asyan-shop", activate_shop=True)
+    first = link_identity(channel="shop", sender_identity="sim-remembered-customer",
+                          business_slug="asyan-shop")
+    assert first["customer_profile"] == {
+        "display_name": None, "name_on_file": False, "payment_email_on_file": False,
+    }
+    named = link_identity(channel="shop", sender_identity="sim-remembered-customer",
+                          display_name="Momo A.", business_slug="asyan-shop")
+    assert named["customer_profile"]["display_name"] == "Momo A."
+    resumed = link_identity(channel="shop", sender_identity="sim-remembered-customer",
+                            business_slug="asyan-shop")
+    assert resumed["customer_profile"]["name_on_file"] is True
+    order = create_order(
+        resumed["session_token"],
+        [{"product_id": product_id(owner["session_token"], "Brownie box"), "quantity": 1}],
+        "remembered-name-order",
+    )
+    from server.business import get_order_queue
+    queued = get_order_queue(owner["session_token"])["orders"]
+    assert next(item for item in queued if item["id"] == order["order_id"])["customer_name"] == "Momo A."
+
+
 def test_shop_entry_redirect_exists_only_after_bound_business_activation(monkeypatch):
     monkeypatch.setenv("TALLY_SHOP_BOUND_SLUG", "asyan-shop")
     monkeypatch.setenv("TALLY_SHOP_AGENT_URL", "https://chat.example/asyan-agent")
@@ -293,17 +322,22 @@ def test_paystack_connection_needs_only_restricted_key_and_claim_is_api_verified
     owner = link_identity(channel="desk", sender_identity="sim-owner-asyan",
                           business_slug="asyan-shop", activate_shop=True)
     customer = link_identity(channel="shop", sender_identity="sim-customer-paystack",
+                             display_name="Momo", customer_email="customer@example.test",
                              business_slug="asyan-shop")
 
-    monkeypatch.setattr(paystack, "initialize_test_transaction",
-                        lambda *_args, **_kwargs: {"method": "paystack", "status": "initialized",
-                                                  "authorization_url": "https://checkout.paystack.test/demo",
-                                                  "reference": "asyan-reference"})
+    checkout = {}
+    def initialize(_business_id, _order_id, _amount_minor, email):
+        checkout["email"] = email
+        return {"method": "paystack", "status": "initialized",
+                "authorization_url": "https://checkout.paystack.test/demo",
+                "reference": "asyan-reference"}
+    monkeypatch.setattr(paystack, "initialize_test_transaction", initialize)
     order = create_order(customer["session_token"],
                          [{"product_id": product_id(owner["session_token"], "Brownie box"),
                            "quantity": 1}],
-                         "asyan-paystack-001", payment_email="customer@example.test")
+                         "asyan-paystack-001")
     assert order["payment"]["status"] == "initialized"
+    assert checkout["email"] == "customer@example.test"
     monkeypatch.setattr(paystack, "verify_test_transaction_for_order",
                         lambda *_args, **_kwargs: {"status": "success", "reference": "asyan-reference",
                                                   "transaction_id": 991122,

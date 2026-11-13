@@ -118,12 +118,67 @@ def test_order_status_and_inventory_warnings():
     with pytest.raises(ToolFailure) as e:update_order_status(op,order['order_id'],'dispatched')
     assert e.value.code=='INVALID_TRANSITION'
     assert pay_http(order['order_id'],1950000).json()['match_status']=='matched'
-    for state in ['preparing','dispatched','fulfilled']:
+    for state in ['preparing','dispatched','delivery_reported']:
         assert update_order_status(op,order['order_id'],state)['status']==state
+    assert get_my_order(customer,order['order_id'],confirm_received=True,
+                        confirmation_note='Received in good condition')['status']=='fulfilled'
     assert get_my_order(customer,order['order_id'])['status']=='fulfilled'
     with pytest.raises(ToolFailure) as e:record_stock_adjustment(op,'brownie',2,'Physical recount')
     assert e.value.code=='FORBIDDEN'
     assert record_stock_adjustment(admin,'brownie',1,'Physical recount')['new_qty']==1
+
+
+def test_merchant_delivery_report_queues_customer_confirmation_then_fulfils():
+    customer=sess('cust-ada','shop');operator=sess('staff-tola','desk')
+    order=create_order(customer,[{'product_id':'brownie','quantity':1}],'offline-fulfilled')
+    assert pay_http(order['order_id'],650000).json()['match_status']=='matched'
+    reported=update_order_status(operator,order['order_id'],'delivery_reported')
+    assert reported['previous_status']=='confirmed'
+    assert reported['status']=='delivery_reported'
+    assert reported['skipped_statuses']==['preparing','dispatched']
+    assert reported['customer_confirmation']['status']=='pending'
+    resumed=link_identity(issue_link_code('cust-ada'),'shop')
+    action=next(item for item in resumed['pending_actions'] if item['order_id']==order['order_id'])
+    assert action['kind']=='confirm_delivery'
+    fulfilled=get_my_order(customer,order['order_id'],confirm_received=True,
+                           confirmation_note='Received, thank you')
+    assert fulfilled['status']=='fulfilled'
+    assert fulfilled['recorded_from']=='customer'
+    product=next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products']
+                 if p['id']=='brownie')
+    assert product['available_qty']==4
+
+
+def test_customer_receipt_confirmation_fulfils_only_their_paid_order_once():
+    customer=sess('cust-ada','shop')
+    order=create_order(customer,[{'product_id':'cup-choc','quantity':2}],'customer-received')
+    with pytest.raises(ToolFailure) as error:
+        get_my_order(customer,order['order_id'],confirm_received=True)
+    assert error.value.code=='INVALID_TRANSITION'
+    assert pay_http(order['order_id'],500000).json()['match_status']=='matched'
+    received=get_my_order(
+        customer,order['order_id'],confirm_received=True,
+        confirmation_note='Order delivered, thank you')
+    assert received['status']=='fulfilled'
+    assert received['skipped_statuses']==['preparing','dispatched','delivery_reported']
+    assert received['recorded_from']=='customer'
+    repeated=get_my_order(customer,order['order_id'],confirm_received=True)
+    assert repeated['status']=='fulfilled' and repeated['duplicate'] is True
+    product=next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products']
+                 if p['id']=='cup-choc')
+    assert product['available_qty']==12
+
+
+def test_customer_disputes_merchant_delivery_report_into_support_queue():
+    customer=sess('cust-ada','shop');operator=sess('staff-tola','desk')
+    order=create_order(customer,[{'product_id':'brownie','quantity':1}],'delivery-dispute')
+    assert pay_http(order['order_id'],650000).json()['match_status']=='matched'
+    update_order_status(operator,order['order_id'],'delivery_reported')
+    disputed=create_support_case(
+        customer,'complaint','I have not received this order',order['order_id'])
+    assert disputed['delivery_dispute'] is True
+    assert get_my_order(customer,order['order_id'])['status']=='delivery_reported'
+    assert any(case['id']==disputed['case_id'] for case in list_support_cases(operator)['cases'])
 
 
 def test_case_privacy_staff_replies_and_catchup():

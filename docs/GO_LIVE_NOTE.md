@@ -2,7 +2,7 @@
 
 Tally Shop receives customer product questions, orders, payment reports and complaints through a simulated WhatsApp-style channel. Tally Desk gives authorized staff a view of orders, provider-verified matched payments, payment exceptions, inventory warnings and customer issues. Prices, payment status and stock come from the merchant ledger; Tally will never confirm payment from a customer’s screenshot or statement alone.
 
-An Admin maintains the catalogue, prices, physical stock and alert thresholds. Operators can inspect operations, respond to customer cases and advance only paid orders from preparing to fulfilled. Every private action uses a short-lived sandbox actor session and backend role checks. A teammate name, chat link or claim to be the owner does not grant staff access.
+An Admin maintains the catalogue, prices, physical stock and alert thresholds. Operators can inspect operations, respond to customer cases and record forward progress on paid orders, including work completed offline. A merchant delivery report requests customer confirmation; customer receipt promotes only that customer's paid order to fulfilled, while a mismatch opens a case. Skipped states are audited, stock is deducted once, and unpaid fulfilment remains prohibited. Every private action uses a short-lived sandbox actor session and backend role checks.
 
 When a question needs merchant judgment, Tally creates a case and can request human help. A staff reply stored in a case is not proof that the customer received it. Native takeover, direct outbound delivery and hand-back must be verified in the selected channel; until then, customers retrieve approved case replies through Tally Shop.
 

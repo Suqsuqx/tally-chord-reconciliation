@@ -16,6 +16,12 @@ The default-off provider core was deployed on 11 November. On 12 November, the m
 - Notion's authorization prompt is the page picker. Search and reads use only the resulting business token. Returned document content is bounded and labelled untrusted merchant data; it is never interpreted as instructions and is not imported without a later approval step. A separate Admin approval selects one authorized parent page before Tally creates or updates its five-section merchant workspace.
 - Provider features remain disabled unless explicitly enabled after preflight, backup, migration and rollback preparation.
 
+## Customer checkout data
+
+Paystack requires `email` and `amount` before its transaction-initialize endpoint returns a hosted checkout URL. The hosted page therefore cannot collect the email first. Tally asks for an email only when the merchant uses Paystack and no email is remembered for that authenticated customer; it then reuses the saved value on later orders. The merchant's configured payment method is selected automatically—Shop never asks customers to choose Paystack versus manual bank.
+
+Paystack's enabled Checkout channels may include “Pay with transfer,” which generates a temporary bank account inside the hosted payment experience. A Dedicated Virtual Account is not the default substitute: it is a longer-lived customer facility, still requires email, name and phone, may require identity validation, and requires express customer consent.
+
 ## Platform configuration
 
 Keep only Tally-owned platform configuration in the private service environment:

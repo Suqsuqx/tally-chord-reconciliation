@@ -61,16 +61,29 @@ def _sender_hash(sender_identity):
     normalized=' '.join(sender_identity.strip().lower().split())
     return digest('tally|sandbox-sender|'+normalized)
 
+def _customer_email(value):
+    require(isinstance(value,str),'INVALID_INPUT','Provide a valid customer email address')
+    email=value.strip().lower()
+    require(len(email)<=254 and re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email) is not None,
+            'INVALID_INPUT','Provide a valid customer email address')
+    return email
+
+def _customer_name(value):
+    require(isinstance(value,str),'INVALID_INPUT','Provide a valid customer name')
+    name=' '.join(value.strip().split())
+    require(1<=len(name)<=160,'INVALID_INPUT','Provide a valid customer name')
+    return name
+
 def _issue_session(c,actor,registration_status='resumed'):
     session=secrets.token_urlsafe(32)
     expires=(datetime.now(timezone.utc)+timedelta(hours=2)).isoformat()
     c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(digest(session),actor['id'],expires,now()))
     business=c.execute('SELECT name FROM businesses WHERE id=?',(actor['business_id'],)).fetchone()
-    settings=c.execute('SELECT shop_slug,onboarding_status FROM business_settings WHERE business_id=?',
+    settings=c.execute('SELECT shop_slug,onboarding_status,payment_method FROM business_settings WHERE business_id=?',
                        (actor['business_id'],)).fetchone()
     product_count=c.execute('SELECT COUNT(*) n FROM products WHERE business_id=? AND active=1',
                             (actor['business_id'],)).fetchone()['n']
-    return {'session_token':session,'role':actor['role'],'business_id':actor['business_id'],
+    result={'session_token':session,'role':actor['role'],'business_id':actor['business_id'],
             'business_name':business['name'],'shop_slug':settings['shop_slug'] if settings else None,
             'shop_status':settings['onboarding_status'] if settings else 'onboarding',
             'shop_access':_shop_access(settings['shop_slug'],settings['onboarding_status']) if settings else None,
@@ -79,6 +92,19 @@ def _issue_session(c,actor,registration_status='resumed'):
             'expires_at':expires,
             'identity_assurance':'unverified_simulator' if actor['id'].startswith(('own-','cus-')) else 'sandbox_code',
             'note':'Sandbox routing only. The live product must derive identity from the authenticated WhatsApp sender.'}
+    if actor['kind']=='customer':
+        saved_name=actor['display_name'] if actor['display_name']!='Customer' else None
+        result['customer_profile']={
+            'display_name':saved_name,
+            'name_on_file':bool(saved_name),
+            'payment_email_on_file':bool(actor['email']),
+        }
+        result['checkout']={'method':settings['payment_method'] if settings else None}
+        pending=c.execute('''SELECT kind,order_id,message FROM customer_notifications
+                             WHERE customer_id=? AND business_id=? AND status='pending'
+                             ORDER BY created_at''',(actor['id'],actor['business_id'])).fetchall()
+        result['pending_actions']=[rowdict(item) for item in pending]
+    return result
 
 def _validate_profile(profile):
     if profile is None:return None
@@ -158,7 +184,7 @@ def _configure_business(c,actor,profile=None,policies=None,manual_bank=None,acti
     if any(value is not None for value in (profile_value,policies_value,manual_bank)) or activate_shop:
         audit(c,actor,'business.onboarding_updated',actor['business_id'],{'activated':bool(activate_shop)})
 
-def link_identity(code=None, channel='shop', sender_identity=None, display_name=None, business_name=None,
+def link_identity(code=None, channel='shop', sender_identity=None, display_name=None, customer_email=None, business_name=None,
                   business_slug=None, profile=None, policies=None, manual_bank=None, activate_shop=False,
                   notion_workspace=None):
     """Legacy code linking plus sandbox sender-routed onboarding.
@@ -201,6 +227,8 @@ def link_identity(code=None, channel='shop', sender_identity=None, display_name=
             return _issue_session(c,membership,'created' if created else 'resumed')
         require(channel=='shop','INVALID_INPUT','Unknown channel')
         require(requested_slug is not None,'INVALID_INPUT','A shop identifier is required')
+        clean_name=_customer_name(display_name) if display_name is not None else None
+        clean_email=_customer_email(customer_email) if customer_email is not None else None
         settings=c.execute('SELECT * FROM business_settings WHERE shop_slug=?',(requested_slug,)).fetchone()
         require(settings is not None and settings['onboarding_status']=='active','SHOP_UNAVAILABLE','This shop is not active')
         membership=c.execute('''SELECT a.* FROM channel_identities i JOIN actors a ON a.id=i.actor_id
@@ -208,11 +236,17 @@ def link_identity(code=None, channel='shop', sender_identity=None, display_name=
                              (identity_hash,settings['business_id'])).fetchone()
         if membership is None:
             actor_id=new_id('cus')
-            c.execute('''INSERT INTO actors (id,business_id,kind,role,display_name) VALUES(?,?,?,?,?)''',
-                      (actor_id,settings['business_id'],'customer','customer',(display_name or 'Customer')[:160]))
+            c.execute('''INSERT INTO actors (id,business_id,kind,role,display_name,email) VALUES(?,?,?,?,?,?)''',
+                      (actor_id,settings['business_id'],'customer','customer',clean_name or 'Customer',clean_email))
             c.execute('INSERT INTO channel_identities VALUES(?,?,?,?,?)',
                       ('shop',identity_hash,settings['business_id'],actor_id,now()))
             membership=c.execute('SELECT * FROM actors WHERE id=?',(actor_id,)).fetchone()
+        elif clean_name is not None or clean_email is not None:
+            c.execute('''UPDATE actors SET display_name=COALESCE(?,display_name),email=COALESCE(?,email)
+                         WHERE id=?''',(clean_name,clean_email,membership['id']))
+            membership=c.execute('SELECT * FROM actors WHERE id=?',(membership['id'],)).fetchone()
+            audit(c,membership,'customer.profile_updated',membership['id'],{
+                'name_updated':clean_name is not None,'email_updated':clean_email is not None})
         return _issue_session(c,membership)
 
 def _link_identity_code(code,channel):
@@ -313,12 +347,27 @@ def get_catalog(channel='shop',session_token=None,shop_slug=None,notion_resource
         if settings:
             result['business_profile']=json.loads(settings['profile_json'] or '{}')
             result['policies']=json.loads(settings['policies_json'] or '[]')
+            result['checkout']={'method':settings['payment_method']}
         if channel=='desk' and settings:
             resources=c.execute('''SELECT resource_id,resource_type,title FROM provider_resources
                                    WHERE business_id=? AND provider='notion' ORDER BY title''',(business_id,)).fetchall()
+            profile=result['business_profile']
+            policies=result['policies']
             result['onboarding']={'status':settings['onboarding_status'],
                                   'payment_method':settings['payment_method'],
-                                  'notion_resources':[rowdict(row) for row in resources]}
+                                  'notion_resources':[rowdict(row) for row in resources],
+                                  'sections':{
+                                      'business_profile':{'status':'saved' if profile else 'not_started',
+                                                          'recommended':True},
+                                      'catalogue':{'status':'ready' if products else 'not_started',
+                                                   'product_count':len(products),'required_for_activation':True},
+                                      'policies':{'status':'saved' if policies else 'not_started',
+                                                  'policy_count':len(policies),'required_for_activation':False},
+                                      'payment':{'status':'ready' if settings['payment_method'] else 'not_started',
+                                                 'method':settings['payment_method'],
+                                                 'required_for_activation':True},
+                                  },
+                                  'activation_ready':bool(products and settings['payment_method'])}
     if channel=='desk' and notion_resource_id:
         from .notion_connections import preview_notion_resource_sync
         result['notion_preview']=preview_notion_resource_sync(session_token,notion_resource_id)
@@ -370,8 +419,13 @@ def _order_payment_instructions(business_id,order_id,total_minor,payment_email=N
 def create_order(session_token,items,request_id,payment_email=None):
     require(isinstance(request_id,str) and len(request_id)>=4,'INVALID_INPUT','Stable request_id required for safe retries')
     require(isinstance(items,list) and len(items)>0 and len(items)<=20,'INVALID_INPUT','At least one item required')
+    supplied_email=_customer_email(payment_email) if payment_email is not None else None
     with tx() as c:
         a=actor_from_token(c,session_token,'shop')
+        checkout_email=supplied_email or a['email']
+        if supplied_email and supplied_email!=a['email']:
+            c.execute('UPDATE actors SET email=? WHERE id=?',(supplied_email,a['id']))
+            audit(c,a,'customer.payment_email_updated',a['id'])
         parsed={}
         for item in items:
             require(isinstance(item,dict),'INVALID_INPUT','Each item must be an object')
@@ -405,17 +459,60 @@ def create_order(session_token,items,request_id,payment_email=None):
             business_id=a['business_id'];order_id=oid;order_total=total
     # Finish provider checkout after the order transaction commits. Retrying with
     # the same request_id is safe and can recover an interrupted network call.
-    result['payment']=_order_payment_instructions(business_id,order_id,order_total,payment_email)
+    result['payment']=_order_payment_instructions(business_id,order_id,order_total,checkout_email)
     return result
 
-def get_my_order(session_token,order_id):
+FULFILMENT_STAGES=('confirmed','preparing','dispatched','delivery_reported','fulfilled')
+
+def _record_forward_order_status(c,actor,order,new_status,source,note=None):
+    require(order['status'] in FULFILMENT_STAGES,'INVALID_TRANSITION',
+            'Payment must be confirmed before fulfilment can be recorded')
+    current_index=FULFILMENT_STAGES.index(order['status'])
+    target_index=FULFILMENT_STAGES.index(new_status)
+    require(target_index>current_index,'INVALID_TRANSITION',
+            f'Cannot move {order["status"]} to {new_status}')
+    skipped=list(FULFILMENT_STAGES[current_index+1:target_index])
+    c.execute('UPDATE orders SET status=?,updated_at=? WHERE id=?',(new_status,now(),order['id']))
+    if new_status=='delivery_reported':
+        c.execute('''INSERT OR IGNORE INTO customer_notifications
+                     (id,business_id,customer_id,order_id,kind,message,status,created_at,resolved_at)
+                     VALUES(?,?,?,?,?,?,'pending',?,NULL)''',
+                  (new_id('notice'),order['business_id'],order['customer_id'],order['id'],
+                   'confirm_delivery',
+                   'The merchant reported this order delivered. Please confirm whether you received it.',now()))
+    if new_status=='fulfilled':
+        for item in c.execute('SELECT * FROM order_items WHERE order_id=?',(order['id'],)).fetchall():
+            c.execute('''UPDATE products
+                         SET stock_on_hand=stock_on_hand-?,stock_reserved=stock_reserved-?,updated_at=?
+                         WHERE id=?''',(item['qty'],item['qty'],now(),item['product_id']))
+        c.execute('''UPDATE customer_notifications SET status='confirmed',resolved_at=?
+                     WHERE order_id=? AND customer_id=? AND kind='confirm_delivery' AND status='pending' ''',
+                  (now(),order['id'],order['customer_id']))
+    audit(c,actor,'order.status_changed',order['id'],{
+        'from':order['status'],'to':new_status,'source':source,
+        'skipped_statuses':skipped,'note':str(note or '')[:500]})
+    return {'order_id':order['id'],'previous_status':order['status'],'status':new_status,
+            'skipped_statuses':skipped,'recorded_from':source}
+
+def get_my_order(session_token,order_id,confirm_received=False,confirmation_note=None):
     with tx() as c:
         a=actor_from_token(c,session_token,'shop')
         o=c.execute('SELECT * FROM orders WHERE id=? AND business_id=? AND customer_id=?',(order_id,a['business_id'],a['id'])).fetchone()
         require(o is not None,'NOT_FOUND','Order not found for this customer')
+        status_result={}
+        if confirm_received:
+            if o['status']=='fulfilled':
+                status_result={'previous_status':'fulfilled','skipped_statuses':[],
+                               'recorded_from':'customer','duplicate':True}
+            else:
+                status_result=_record_forward_order_status(
+                    c,a,o,'fulfilled','customer',confirmation_note or 'Customer confirmed receipt')
+                o=c.execute('SELECT * FROM orders WHERE id=?',(order_id,)).fetchone()
         items=c.execute('SELECT name,qty,price_minor FROM order_items WHERE order_id=?',(order_id,)).fetchall()
-        return {'order_id':o['id'],'total_minor':o['total_minor'],'currency':o['currency'],'status':o['status'],
+        result={'order_id':o['id'],'total_minor':o['total_minor'],'currency':o['currency'],'status':o['status'],
                 'items':[rowdict(i) for i in items]}
+        result.update(status_result)
+        return result
 
 def record_payment_claim(session_token,order_id,note='Customer reports transfer'):
     with tx() as c:
@@ -476,11 +573,14 @@ def ingest_verified_payment(event,business_id=None):
 def get_order_queue(session_token):
     with tx() as c:
         a=actor_from_token(c,session_token,'desk')
-        orders=c.execute('SELECT id,customer_id,total_minor,status,created_at FROM orders WHERE business_id=? ORDER BY created_at DESC LIMIT 40',(a['business_id'],)).fetchall()
+        orders=c.execute('''SELECT o.id,o.customer_id,c.display_name AS customer_name,
+                                   o.total_minor,o.status,o.created_at
+                            FROM orders o JOIN actors c ON c.id=o.customer_id
+                            WHERE o.business_id=? ORDER BY o.created_at DESC LIMIT 40''',
+                         (a['business_id'],)).fetchall()
         return {'orders':[rowdict(x) for x in orders]}
 
 def update_order_status(session_token,order_id,new_status,confirmation_note=None):
-    next_status={'confirmed':'preparing','preparing':'dispatched','dispatched':'fulfilled'}
     with tx() as c:
         a=actor_from_token(c,session_token,'desk')
         o=c.execute('SELECT * FROM orders WHERE id=? AND business_id=?',(order_id,a['business_id'])).fetchone()
@@ -501,14 +601,20 @@ def update_order_status(session_token,order_id,new_status,confirmation_note=None
             audit(c,a,'payment.manually_confirmed',order_id,{'note':confirmation_note.strip()[:500]})
             return {'order_id':order_id,'previous_status':'awaiting_payment','status':'confirmed',
                     'payment_assurance':'merchant_confirmed_manual','provider_verified':False}
-        require(next_status.get(o['status'])==new_status,'INVALID_TRANSITION',f'Cannot move {o["status"]} to {new_status}')
-        c.execute('UPDATE orders SET status=?,updated_at=? WHERE id=?',(new_status,now(),order_id))
+        require(new_status in FULFILMENT_STAGES[1:],'INVALID_TRANSITION','Choose a valid forward fulfilment status')
         if new_status=='fulfilled':
-            for item in c.execute('SELECT * FROM order_items WHERE order_id=?',(order_id,)).fetchall():
-                c.execute('UPDATE products SET stock_on_hand=stock_on_hand-?,stock_reserved=stock_reserved-?,updated_at=? WHERE id=?',
-                          (item['qty'],item['qty'],now(),item['product_id']))
-        audit(c,a,'order.status_changed',order_id,{'from':o['status'],'to':new_status})
-        return {'order_id':order_id,'previous_status':o['status'],'status':new_status}
+            require(isinstance(confirmation_note,str) and len(confirmation_note.strip())>=4,
+                    'CUSTOMER_CONFIRMATION_REQUIRED',
+                    'Record the customer confirmation before marking this order fulfilled')
+        result=_record_forward_order_status(
+            c,a,o,new_status,'merchant',confirmation_note or 'Merchant recorded offline progress')
+        if new_status=='delivery_reported':
+            result['customer_confirmation']={
+                'status':'pending',
+                'outbound_delivery':'not_verified',
+                'message':'Please confirm whether your order has been delivered.',
+            }
+        return result
 
 def get_reconciliation_report(session_token):
     with tx() as c:
@@ -553,16 +659,23 @@ def create_support_case(session_token,category,message,order_id=None):
     require(isinstance(message,str) and len(message.strip())>=5,'INVALID_INPUT','Please describe the issue')
     with tx() as c:
         a=actor_from_token(c,session_token,'shop')
+        delivery_dispute=False
         if order_id:
-            o=c.execute('SELECT id FROM orders WHERE id=? AND customer_id=? AND business_id=?',(order_id,a['id'],a['business_id'])).fetchone()
+            o=c.execute('SELECT id,status FROM orders WHERE id=? AND customer_id=? AND business_id=?',(order_id,a['id'],a['business_id'])).fetchone()
             require(o is not None,'NOT_FOUND','Order not found for this customer')
+            delivery_dispute=category=='complaint' and o['status']=='delivery_reported'
         case=new_id('case')
         c.execute('INSERT INTO support_cases VALUES(?,?,?,?,?,?,?,?,?)',
                   (case,a['business_id'],a['id'],order_id,category,'open',now(),now(),None))
         c.execute('INSERT INTO support_messages VALUES(?,?,?,?,?,?)',
                   (new_id('msg'),case,a['id'],'customer',message.strip(),now()))
+        if delivery_dispute:
+            c.execute('''UPDATE customer_notifications SET status='disputed',resolved_at=?
+                         WHERE order_id=? AND customer_id=? AND kind='confirm_delivery' AND status='pending' ''',
+                      (now(),order_id,a['id']))
         audit(c,a,'support.opened',case,{'category':category})
-        return {'case_id':case,'status':'open','message':'Your message has been passed to the team'}
+        return {'case_id':case,'status':'open','delivery_dispute':delivery_dispute,
+                'message':'Your message has been passed to the team'}
 
 def get_my_support_case(session_token,case_id):
     with tx() as c:
