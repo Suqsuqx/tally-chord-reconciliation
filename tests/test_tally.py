@@ -218,6 +218,24 @@ def test_mcp_discovery_role_isolation_and_real_tool_invocation():
     blocked=client.post('/mcp/shop',headers=shop_h,json={'jsonrpc':'2.0','id':5,'method':'tools/call','params':{'name':'get_reconciliation_report','arguments':{}}}).json()
     assert blocked['result']['isError'] is True
 
+def test_mcp_failure_is_correlated_without_logging_merchant_values(caplog):
+    client=TestClient(app)
+    headers={'Authorization':'Bearer SHOP_SUPER_LONG_RANDOM_TEST_SECRET'}
+    with caplog.at_level('WARNING',logger='uvicorn.error'):
+        response=client.post('/mcp/shop',headers=headers,json={
+            'jsonrpc':'2.0','id':7,'method':'tools/call',
+            'params':{'name':'get_my_order','arguments':{
+                'session_token':'DO_NOT_LOG_PRIVATE_SESSION',
+                'order_id':'DO_NOT_LOG_PRIVATE_ORDER',
+            }},
+        }).json()
+    result=json.loads(response['result']['content'][0]['text'])
+    assert response['result']['isError'] is True
+    assert result['support_reference'].startswith('tly-')
+    assert result['support_reference'] in caplog.text
+    assert 'channel=shop tool=get_my_order' in caplog.text
+    assert 'DO_NOT_LOG_PRIVATE' not in caplog.text
+
 def test_idempotency_conflict_and_time_window():
     customer=sess('cust-ada','shop');staff=sess('staff-eni','desk')
     create_order(customer,[{'product_id':'cup-choc','quantity':1}],'stable-001')

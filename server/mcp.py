@@ -1,7 +1,22 @@
 """Minimal stateless MCP Streamable HTTP transport. Responses use JSON-RPC over HTTPS."""
 import json
+import logging
 import os
+import secrets
 from .business import bind_shop_call, invoke, ToolFailure
+
+logger=logging.getLogger('uvicorn.error')
+
+def _incident_reference():
+    return 'tly-'+secrets.token_hex(5)
+
+def _log_tool_failure(channel,name,code,unexpected=False):
+    """Record a correlation-safe failure without logging tool arguments or secrets."""
+    reference=_incident_reference()
+    log=logger.error if unexpected else logger.warning
+    log('tally_tool_failure reference=%s channel=%s tool=%s code=%s',
+        reference,channel,name or 'unknown',code,exc_info=unexpected)
+    return reference
 
 # Tools must use exact public names below; per-server allowlists are enforced twice.
 S=lambda desc,props,required=[]:{'description':desc,'inputSchema':{'type':'object','properties':props,'required':required,'additionalProperties':False}}
@@ -65,13 +80,15 @@ def _attach_admin_setup_links(channel,name,result):
         try:
             links['paystack']=issue_paystack_setup_link(session_token)
         except ToolFailure as ex:
-            links['paystack']={'status':'unavailable','error':ex.code}
+            reference=_log_tool_failure(channel,'issue_paystack_setup_link',ex.code)
+            links['paystack']={'status':'unavailable','error':ex.code,'support_reference':reference}
     if os.getenv('TALLY_NOTION_CONNECTIONS_ENABLED','false').lower()=='true':
         from .notion_connections import issue_notion_setup_link
         try:
             links['notion']=issue_notion_setup_link(session_token)
         except ToolFailure as ex:
-            links['notion']={'status':'unavailable','error':ex.code}
+            reference=_log_tool_failure(channel,'issue_notion_setup_link',ex.code)
+            links['notion']={'status':'unavailable','error':ex.code,'support_reference':reference}
     if links:
         result=dict(result)
         result['provider_setup']=links
@@ -102,9 +119,13 @@ def _sync_approved_notion_data(channel,name,args,result):
             from .notion_connections import sync_order_snapshot
             sync_result=sync_order_snapshot(result['order_id'])
     except ToolFailure as ex:
-        sync_result={'status':'failed','error':ex.code,'message':ex.message}
+        reference=_log_tool_failure(channel,'notion_sync',ex.code)
+        sync_result={'status':'failed','error':ex.code,'message':'Notion could not be updated',
+                     'support_reference':reference}
     except Exception:
-        sync_result={'status':'failed','error':'NOTION_SYNC_FAILED','message':'Notion could not be updated'}
+        reference=_log_tool_failure(channel,'notion_sync','NOTION_SYNC_FAILED',unexpected=True)
+        sync_result={'status':'failed','error':'NOTION_SYNC_FAILED','message':'Notion could not be updated',
+                     'support_reference':reference}
     if sync_result is not None and channel=='desk':
         result=dict(result)
         result['notion_sync']=sync_result
@@ -127,7 +148,8 @@ def process(channel,body):
         name=body.get('params',{}).get('name')
         args=body.get('params',{}).get('arguments',{})
         if name not in ALL[channel]:
-            return {'jsonrpc':'2.0','id':request_id,'result':{'isError':True,'content':[{'type':'text','text':json.dumps({'error':'FORBIDDEN','message':'Tool not enabled'})}]}}
+            reference=_log_tool_failure(channel,name,'FORBIDDEN')
+            return {'jsonrpc':'2.0','id':request_id,'result':{'isError':True,'content':[{'type':'text','text':json.dumps({'error':'FORBIDDEN','message':'That action is not available here','support_reference':reference})}]}}
         try:
             if channel=='shop':
                 args=bind_shop_call(name,args,os.getenv('TALLY_SHOP_BOUND_SLUG'))
@@ -136,7 +158,9 @@ def process(channel,body):
             result=_attach_admin_setup_links(channel,name,result)
             return {'jsonrpc':'2.0','id':request_id,'result':{'content':[{'type':'text','text':json.dumps(result,ensure_ascii=False)}]}}
         except ToolFailure as ex:
-            return {'jsonrpc':'2.0','id':request_id,'result':{'isError':True,'content':[{'type':'text','text':json.dumps({'error':ex.code,'message':ex.message})}]}}
-        except Exception as ex:
-            return {'jsonrpc':'2.0','id':request_id,'result':{'isError':True,'content':[{'type':'text','text':json.dumps({'error':'SERVER_ERROR','message':'Unexpected server error'})}]}}
+            reference=_log_tool_failure(channel,name,ex.code)
+            return {'jsonrpc':'2.0','id':request_id,'result':{'isError':True,'content':[{'type':'text','text':json.dumps({'error':ex.code,'message':ex.message,'support_reference':reference})}]}}
+        except Exception:
+            reference=_log_tool_failure(channel,name,'SERVER_ERROR',unexpected=True)
+            return {'jsonrpc':'2.0','id':request_id,'result':{'isError':True,'content':[{'type':'text','text':json.dumps({'error':'SERVER_ERROR','message':'Tally could not complete that action','support_reference':reference})}]}}
     return {'jsonrpc':'2.0','id':request_id,'error':{'code':-32601,'message':'Method not found'}}
