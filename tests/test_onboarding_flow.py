@@ -391,6 +391,9 @@ def test_paystack_connection_needs_only_restricted_key_and_claim_is_api_verified
         "url": "https://checkout.paystack.test/demo",
     }
     assert checkout["email"] == "customer@example.test"
+    monkeypatch.setattr(paystack, "verify_test_transaction_for_order",
+                        lambda *_args, **_kwargs: {"status": "not_verified",
+                                                  "reference": "asyan-reference"})
     awaiting = get_my_order(customer["session_token"], order["order_id"])
     assert awaiting["status"] == "awaiting_payment"
     assert awaiting["payment"]["customer_action"]["url"] == "https://checkout.paystack.test/demo"
@@ -398,7 +401,19 @@ def test_paystack_connection_needs_only_restricted_key_and_claim_is_api_verified
                         lambda *_args, **_kwargs: {"status": "success", "reference": "asyan-reference",
                                                   "transaction_id": 991122,
                                                   "amount_minor": order["total_minor"], "currency": "NGN"})
-    claim = record_payment_claim(customer["session_token"], order["order_id"], "Paid")
-    assert claim["verified"] is True
-    assert claim["verification_source"] == "paystack_api"
-    assert get_my_order(customer["session_token"], order["order_id"])["status"] == "confirmed"
+    confirmed = get_my_order(customer["session_token"], order["order_id"])
+    assert confirmed["status"] == "confirmed"
+    assert confirmed["payment"] == {
+        "method": "paystack", "status": "verified", "verified": True,
+        "verification_source": "paystack_api",
+    }
+    with tx() as conn:
+        assert conn.execute(
+            "SELECT status FROM payment_provider_references WHERE order_id=?",
+            (order["order_id"],),
+        ).fetchone()[0] == "verified"
+    duplicate_claim = record_payment_claim(
+        customer["session_token"], order["order_id"], "Paid",
+    )
+    assert duplicate_claim["verified"] is True
+    assert duplicate_claim["verification_source"] == "paystack_api"

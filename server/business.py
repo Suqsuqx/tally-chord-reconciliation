@@ -642,26 +642,24 @@ def get_my_order(session_token,order_id,confirm_received=False,confirmation_note
         result.update(status_result)
         business_id=a['business_id']
         payment_email=a['email']
-    # An awaiting-payment lookup must remain actionable. This recovers and
-    # returns the existing idempotent checkout URL even when an agent performs
-    # a status lookup immediately after create_order, without another provider
-    # network request.
+    # A status lookup is also a safe provider reconciliation opportunity. This
+    # covers chat agents that correctly check the order after "I've paid" but
+    # select get_my_order instead of record_payment_claim. Customer wording
+    # never confirms payment; only the mapped Paystack API result can do so.
     if result['status']=='awaiting_payment':
+        verification=_verify_and_reconcile_paystack_order(business_id,result['order_id'])
+        if verification.get('verified'):
+            result.update({'status':'confirmed','payment':{
+                'method':'paystack','status':'verified','verified':True,
+                'verification_source':'paystack_api'}})
+            return result
+        # If Paystack has not verified the charge, keep the existing checkout
+        # actionable without initializing a second transaction.
         result['payment']=_stored_order_payment_instructions(
             business_id,result['order_id'],result['total_minor'],payment_email)
     return result
 
-def record_payment_claim(session_token,order_id,note='Customer reports transfer'):
-    with tx() as c:
-        a=actor_from_token(c,session_token,'shop')
-        o=c.execute('SELECT * FROM orders WHERE id=? AND business_id=? AND customer_id=?',(order_id,a['business_id'],a['id'])).fetchone()
-        require(o is not None,'NOT_FOUND','Order not found for this customer')
-        cid=new_id('clm')
-        c.execute('INSERT INTO payment_claims VALUES(?,?,?,?,?)',(cid,order_id,a['id'],str(note)[:500],now()))
-        audit(c,a,'payment.claimed',order_id)
-        business_id=a['business_id']
-        result={'claim_id':cid,'order_id':order_id,'status':o['status'],'verified':False,
-                'verification_source':None}
+def _verify_and_reconcile_paystack_order(business_id,order_id):
     try:
         from .paystack_connections import verify_test_transaction_for_order
         verified=verify_test_transaction_for_order(business_id,order_id)
@@ -674,11 +672,30 @@ def record_payment_claim(session_token,order_id,note='Customer reports transfer'
                 'event_id':f'paystack-test-verify:{transaction_id}',
                 'reference':order_id,'amount_minor':verified['amount_minor'],
                 'currency':verified.get('currency'),'event_status':'success'},business_id=business_id)
-            result.update({'verified':event['match_status']=='matched','verification_source':'paystack_api',
-                           'match_status':event['match_status'],
-                           'status':'confirmed' if event['match_status']=='matched' else 'awaiting_payment'})
-            return result
-    result['provider_check_status']=verified.get('status') if verified else 'not_connected'
+            matched=event['match_status'] in ('matched','already_processed')
+            if matched:
+                with tx() as c:
+                    c.execute("""UPDATE payment_provider_references SET status='verified'
+                                 WHERE provider='paystack' AND environment='test'
+                                 AND business_id=? AND order_id=?""",(business_id,order_id))
+            return {'verified':matched,'verification_source':'paystack_api',
+                    'match_status':event['match_status'],
+                    'status':'confirmed' if matched else 'awaiting_payment'}
+    return {'verified':False,
+            'provider_check_status':verified.get('status') if verified else 'not_connected'}
+
+def record_payment_claim(session_token,order_id,note='Customer reports transfer'):
+    with tx() as c:
+        a=actor_from_token(c,session_token,'shop')
+        o=c.execute('SELECT * FROM orders WHERE id=? AND business_id=? AND customer_id=?',(order_id,a['business_id'],a['id'])).fetchone()
+        require(o is not None,'NOT_FOUND','Order not found for this customer')
+        cid=new_id('clm')
+        c.execute('INSERT INTO payment_claims VALUES(?,?,?,?,?)',(cid,order_id,a['id'],str(note)[:500],now()))
+        audit(c,a,'payment.claimed',order_id)
+        business_id=a['business_id']
+        result={'claim_id':cid,'order_id':order_id,'status':o['status'],'verified':False,
+                'verification_source':None}
+    result.update(_verify_and_reconcile_paystack_order(business_id,order_id))
     return result
 
 def ingest_verified_payment(event,business_id=None):
