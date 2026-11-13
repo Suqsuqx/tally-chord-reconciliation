@@ -13,7 +13,7 @@ The default-off provider core was deployed on 11 November. On 12 November, the m
 - Setup bearer values stay in URL fragments, are removed from the browser address before requests and are never environment variables.
 - Paystack restricted keys and webhook signing secrets are submitted directly to Tally's HTTPS form, validated, then AES-GCM encrypted against the business and connection identifiers.
 - Notion client ID/secret are Tally platform credentials. Merchant access/refresh tokens are OAuth results encrypted per business; refresh rotates both tokens.
-- Notion's authorization prompt is the page picker. Search and reads use only the resulting business token. Returned document content is bounded and labelled untrusted merchant data; it is never interpreted as instructions and is not imported without a later approval step. A separate Admin approval selects one authorized parent page before Tally creates or updates its five-section merchant workspace.
+- Notion's authorization prompt is the page picker. The Tally setup page explains that continuing authorizes read access plus creation and maintenance of Tally's managed sections inside the one selected business workspace page. The successful OAuth callback creates those sections and backfills current approved products, orders and support cases; no second chat approval is required. Returned merchant-authored content remains bounded, labelled untrusted data and is never imported into SQL without separate approval.
 - Provider features remain disabled unless explicitly enabled after preflight, backup, migration and rollback preparation.
 
 ## Customer checkout data

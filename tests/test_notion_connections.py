@@ -7,12 +7,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.app import app
-from server.business import ToolFailure, issue_link_code, link_identity, upsert_product
+from server.business import (ToolFailure, create_support_case, issue_link_code, link_identity,
+    upsert_product)
 from server.db import tx
 from server.notion_connections import (cancel_notion_oauth, complete_notion_oauth, discover_authorized_resources,
     issue_notion_setup_link,
-    initialize_notion_workspace_sync, load_notion_connection_for_business, preview_notion_resource,
-    refresh_notion_connection, start_notion_oauth, sync_business_snapshot, sync_product_snapshot)
+    initialize_notion_workspace_for_business, initialize_notion_workspace_sync,
+    load_notion_connection_for_business, preview_notion_resource, refresh_notion_connection,
+    select_notion_workspace_parent, start_notion_oauth, sync_business_snapshot,
+    sync_product_snapshot, sync_support_case_snapshot)
 from server.mcp import process
 from tests.demo_seed import DEMO_BUSINESS_ID,seed_demo
 
@@ -254,6 +257,8 @@ def test_discovery_includes_readable_direct_child_pages_and_data_sources():
         ("data_source", "Catalogue"),
     ]
     assert all(item["read_status"] == "readable" for item in result["resources"])
+    assert result["resources"][1]["parent_id"] == "root-page"
+    assert result["resources"][2]["parent_id"] == "root-page"
 
 
 def test_refresh_rotates_both_encrypted_tokens_without_plaintext_storage():
@@ -278,7 +283,9 @@ def test_notion_setup_page_has_no_store_and_strict_browser_policy():
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
-    assert "Nothing is imported or written until you approve" in response.text
+    assert "Your authorization is the approval" in response.text
+    assert "Authorize and set up Notion" in response.text
+    assert "create or update its managed sections" in response.text
     assert "This setup link is incomplete or expired" in response.text
 
 
@@ -354,3 +361,41 @@ def test_admin_can_create_and_update_merchant_readable_notion_workspace():
     product_pages = [call for call in calls if call[0] == "POST" and call[1] == "/pages"
                      and call[2]["properties"]["title"]["title"][0]["text"]["content"] == "Approved cupcake"]
     assert len(product_pages) == 1
+
+
+def test_linking_consent_selects_root_creates_workspace_and_backfills_current_data():
+    connect_notion()
+    assert select_notion_workspace_parent(DEMO_BUSINESS_ID) == "page-asyan-profile"
+    calls = []
+    page_number = 0
+
+    def requester(method, path, body):
+        nonlocal page_number
+        calls.append((method, path, body))
+        if method == "POST" and path == "/pages":
+            page_number += 1
+            return {"id": f"auto-notion-page-{page_number}"}
+        if method == "PATCH" and path.startswith("/blocks/"):
+            return {"object": "list", "results": []}
+        raise AssertionError((method, path))
+
+    workspace = initialize_notion_workspace_for_business(
+        DEMO_BUSINESS_ID, "page-asyan-profile", requester=requester, backfill=True)
+    assert workspace["created"] is True
+    assert workspace["backfill"]["products"] == 3
+    assert workspace["backfill"]["orders"] == 0
+    assert workspace["backfill"]["support_cases"] == 0
+    with tx() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM notion_workspaces").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM notion_records WHERE record_type='product'"
+        ).fetchone()[0] == 3
+
+    customer = link_identity(issue_link_code("cust-ada"), "shop")["session_token"]
+    case_id = create_support_case(customer, "complaint", "My delivery has not arrived")["case_id"]
+    synced = sync_support_case_snapshot(case_id, requester=requester)
+    assert synced["status"] == "synced"
+    with tx() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM notion_records WHERE record_type='support_case'"
+        ).fetchone()[0] == 1

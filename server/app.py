@@ -13,7 +13,9 @@ from contextlib import asynccontextmanager
 from .business import ingest_verified_payment, resolve_shop_entry, ToolFailure
 from .mcp import process
 from .paystack_connections import complete_paystack_setup
-from .notion_connections import cancel_notion_oauth, complete_notion_oauth, start_notion_oauth
+from .notion_connections import (cancel_notion_oauth, complete_notion_oauth,
+    initialize_notion_workspace_for_business, select_notion_workspace_parent,
+    start_notion_oauth)
 
 logger=logging.getLogger('uvicorn.error')
 
@@ -191,10 +193,10 @@ NOTION_SETUP_HTML="""<!doctype html>
 <meta name="theme-color" content="#078a70"><title>Connect Notion · Tally</title><style>"""+SETUP_PAGE_CSS+"""</style></head>
 <body><main class="page"><header class="brand"><span class="mark" aria-hidden="true">T</span><span class="brand-name">Tally<span class="brand-note">Merchant setup</span></span></header>
 <section class="card"><div class="content"><span class="eyebrow">Notion connection</span><h1>Bring your business into Tally</h1>
-<p class="lede">Choose the Notion pages that contain your catalogue, profile or policies. You stay in control of what Tally can access.</p>
-<ul class="checklist"><li>Preview existing business information before anything is saved</li><li>Select only the pages you want to share</li><li>Optionally let Tally maintain readable Profile, Catalogue, Policies, Orders and Activity sections</li></ul>
-<div class="trust"><span class="trust-icon" aria-hidden="true">✓</span><div><strong>Approval comes first</strong><p>Nothing is imported or written until you approve it in Tally.</p></div></div>
-<button class="button" id="connect" type="button">Continue to Notion</button><p class="status" id="result" role="status" aria-live="polite"></p></div>
+<p class="lede">Choose one business workspace page. Tally will use only that authorized content and keep readable business records there.</p>
+<ul class="checklist"><li>Read the selected business page and its shared content</li><li>Create managed Profile, Catalogue, Policies, Orders and Activity sections inside it</li><li>Keep approved catalogue, order, payment and support updates synchronized automatically</li></ul>
+<div class="trust"><span class="trust-icon" aria-hidden="true">✓</span><div><strong>Your authorization is the approval</strong><p>By continuing, you authorize Tally to read the page you select and create or update its managed sections. SQL remains the authoritative transaction record.</p></div></div>
+<button class="button" id="connect" type="button">Authorize and set up Notion</button><p class="status" id="result" role="status" aria-live="polite"></p></div>
 <footer class="footer">Notion controls page access · Tally stores transactional state securely</footer></section></main>
 <script>const token=new URLSearchParams(location.hash.slice(1)).get('token')||'';history.replaceState(null,'',location.pathname);
 const button=document.querySelector('#connect'),result=document.querySelector('#result');const status=(message,state)=>{result.textContent=message;result.dataset.state=state};
@@ -245,11 +247,18 @@ async def notion_callback(request:Request):
                             status_code=400,headers=NO_STORE_HEADERS)
     try:
         result=await complete_notion_oauth(code,state)
+        parent_page_id=select_notion_workspace_parent(result['business_id'])
+        workspace=initialize_notion_workspace_for_business(
+            result['business_id'],parent_page_id,backfill=True)
         count=len(result['authorized_resources'])
         readable=sum(item.get('read_status')=='readable' for item in result['authorized_resources'])
-        body=_connection_result_html('Notion connected',f'Tally found {count} authorized resource(s) and verified access to {readable}. Return to Tally to preview existing business data or approve a page for your workspace.')
+        backfill=workspace.get('backfill') or {}
+        body=_connection_result_html('Notion connected',f'Tally verified {readable} of {count} authorized resource(s), created the managed business sections and synchronized {backfill.get("products",0)} product(s), {backfill.get("orders",0)} order(s) and {backfill.get("support_cases",0)} support case(s). Future approved updates will be added automatically.')
         return HTMLResponse(body,headers=NO_STORE_HEADERS)
-    except (ValueError,ToolFailure):
+    except (ValueError,ToolFailure) as exc:
+        reference='tly-'+secrets.token_hex(5)
+        logger.warning('notion_oauth_or_workspace_failed reference=%s code=%s',
+                       reference,getattr(exc,'code','NOTION_CONNECTION_FAILED'))
         return HTMLResponse(_connection_result_html('Notion connection failed','Tally could not complete the connection. Return to Tally and request a fresh setup link.',False),
                             status_code=400,headers=NO_STORE_HEADERS)
 

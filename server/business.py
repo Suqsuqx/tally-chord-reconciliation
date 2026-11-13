@@ -185,8 +185,7 @@ def _configure_business(c,actor,profile=None,policies=None,manual_bank=None,acti
         audit(c,actor,'business.onboarding_updated',actor['business_id'],{'activated':bool(activate_shop)})
 
 def link_identity(code=None, channel='shop', sender_identity=None, display_name=None, customer_email=None, business_name=None,
-                  business_slug=None, profile=None, policies=None, manual_bank=None, activate_shop=False,
-                  notion_workspace=None):
+                  business_slug=None, profile=None, policies=None, manual_bank=None, activate_shop=False):
     """Legacy code linking plus sandbox sender-routed onboarding.
 
     sender_identity is deliberately accepted only in this sandbox. A live adapter must

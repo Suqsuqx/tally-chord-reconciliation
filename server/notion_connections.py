@@ -1,6 +1,7 @@
 """Business-scoped Notion OAuth and bounded, read-only content previews."""
 import json
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -168,12 +169,20 @@ def _title(item):
 
 
 def _resource_summary(item):
-    return {
+    parent = item.get("parent") if isinstance(item, dict) else None
+    parent_type = parent.get("type") if isinstance(parent, dict) else None
+    parent_id = parent.get(parent_type) if parent_type in ("page_id", "database_id") else None
+    result = {
         "id": str(item.get("id", ""))[:80],
         "type": item.get("object") if item.get("object") in ("page", "data_source") else "unknown",
         "title": _title(item),
         "last_edited_time": str(item.get("last_edited_time", ""))[:40] or None,
     }
+    if parent_type:
+        result["parent_type"] = str(parent_type)[:40]
+    if parent_id:
+        result["parent_id"] = str(parent_id)[:80]
+    return result
 
 
 async def discover_authorized_resources(access_token, requester=None):
@@ -216,7 +225,8 @@ async def discover_authorized_resources(access_token, requester=None):
             if kind == "child_page" and child_id and child_id not in known:
                 title = str((block.get("child_page") or {}).get("title") or "Untitled page")[:300]
                 summaries.append({"id": child_id, "type": "page", "title": title,
-                                  "last_edited_time": None})
+                                  "last_edited_time": None,
+                                  "parent_type": "page_id", "parent_id": root["id"]})
                 known.add(child_id)
             elif kind == "child_database" and child_id:
                 database = await request("GET", f"/databases/{child_id}")
@@ -233,7 +243,8 @@ async def discover_authorized_resources(access_token, requester=None):
                                 (block.get("child_database") or {}).get("title") or
                                 "Untitled data source")[:300]
                     summaries.append({"id": source_id, "type": "data_source", "title": title,
-                                      "last_edited_time": None})
+                                      "last_edited_time": None,
+                                      "parent_type": "page_id", "parent_id": root["id"]})
                     known.add(source_id)
 
     for summary in summaries[:5]:
@@ -319,7 +330,8 @@ async def complete_notion_oauth(code, state, exchanger=None, discoverer=None):
             resource_id = str(resource.get("id", ""))[:80]
             if not resource_id:
                 continue
-            metadata = {key: resource.get(key) for key in ("last_edited_time", "read_status")
+            metadata = {key: resource.get(key) for key in
+                        ("last_edited_time", "read_status", "parent_type", "parent_id")
                         if resource.get(key) is not None}
             conn.execute("""INSERT INTO provider_resources
                          (connection_id,business_id,provider,resource_id,resource_type,title,metadata_json,discovered_at)
@@ -330,6 +342,7 @@ async def complete_notion_oauth(code, state, exchanger=None, discoverer=None):
         conn.execute("UPDATE provider_oauth_states SET used_at=? WHERE state_hash=?", (timestamp, state_hash))
     return {
         "connection_id": connection_id,
+        "business_id": oauth_state["business_id"],
         "provider": "notion",
         "status": "active",
         "workspace_name": workspace_name,
@@ -392,29 +405,60 @@ def _create_child_page(access_token, parent_page_id, title, intro, requester=Non
     return page_id
 
 
-def initialize_notion_workspace_sync(session_token, parent_page_id, requester=None):
-    """Create Tally's merchant-readable Notion structure after explicit Admin approval."""
+def select_notion_workspace_parent(business_id):
+    """Choose the one OAuth-authorized root page intended as this business workspace."""
+    with tx() as conn:
+        business = conn.execute("SELECT name FROM businesses WHERE id=?", (business_id,)).fetchone()
+        resources = conn.execute("""SELECT resource_id,title,metadata_json FROM provider_resources
+                                  WHERE business_id=? AND provider='notion' AND resource_type='page'""",
+                                 (business_id,)).fetchall()
+    require(business is not None, "NOT_FOUND", "Business not found")
+    require(resources, "NOTION_WORKSPACE_REQUIRED",
+            "Select a Notion page for Tally's managed workspace")
+    page_ids = {item["resource_id"] for item in resources}
+    candidates = []
+    for item in resources:
+        try:
+            metadata = json.loads(item["metadata_json"] or "{}")
+        except ValueError:
+            metadata = {}
+        if metadata.get("parent_id") not in page_ids:
+            candidates.append(item)
+    if len(candidates) == 1:
+        return candidates[0]["resource_id"]
+    normalized_business = re.sub(r"[^a-z0-9]+", "", business["name"].lower())
+    preferred = []
+    for item in candidates or resources:
+        title = re.sub(r"[^a-z0-9]+", "", item["title"].lower())
+        if normalized_business and normalized_business in title and "workspace" in title:
+            preferred.append(item)
+    require(len(preferred) == 1, "NOTION_WORKSPACE_AMBIGUOUS",
+            "Select one business workspace page when connecting Notion")
+    return preferred[0]["resource_id"]
+
+
+def initialize_notion_workspace_for_business(business_id, parent_page_id, requester=None,
+                                             backfill=True):
+    """Create managed sections after the Admin consents on Tally's OAuth linking page."""
     _enabled()
     require(isinstance(parent_page_id, str) and 8 <= len(parent_page_id) <= 80,
             "INVALID_INPUT", "Select an authorized Notion page for the Tally workspace")
     with tx() as conn:
-        actor = actor_from_token(conn, session_token, "desk")
-        require_role(actor, "admin")
         resource = conn.execute("""SELECT * FROM provider_resources WHERE business_id=?
                                    AND provider='notion' AND resource_id=? AND resource_type='page'""",
-                                (actor["business_id"], parent_page_id)).fetchone()
+                                (business_id, parent_page_id)).fetchone()
         require(resource is not None, "NOT_FOUND",
                 "Choose a page that this business authorized through Notion")
         existing = conn.execute("SELECT * FROM notion_workspaces WHERE business_id=?",
-                                (actor["business_id"],)).fetchone()
+                                (business_id,)).fetchone()
         business = conn.execute("SELECT name FROM businesses WHERE id=?",
-                                (actor["business_id"],)).fetchone()
+                                (business_id,)).fetchone()
     if existing is not None:
         require(existing["parent_page_id"] == parent_page_id, "ALREADY_CONFIGURED",
                 "This business already has a different Notion workspace page")
         return {"status": "active", "created": False, "parent_page_id": parent_page_id,
                 "workspace_url": _notion_url(parent_page_id)}
-    connection = load_notion_connection_for_business(actor["business_id"])
+    connection = load_notion_connection_for_business(business_id)
     require(connection is not None, "NOT_CONNECTED", "Connect Notion first")
     access_token = connection["credentials"]["access_token"]
     business_name = business["name"]
@@ -435,7 +479,7 @@ def initialize_notion_workspace_sync(session_token, parent_page_id, requester=No
                      (business_id,connection_id,parent_page_id,profile_page_id,catalogue_page_id,
                       policies_page_id,orders_page_id,activity_page_id,created_at,updated_at)
                      VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                     (actor["business_id"], connection["id"], parent_page_id,
+                     (business_id, connection["id"], parent_page_id,
                       sections["profile"], sections["catalogue"], sections["policies"],
                       sections["orders"], sections["activity"], timestamp, timestamp))
         permissions = set(json.loads(connection.get("permissions_json") or "[]"))
@@ -446,10 +490,22 @@ def initialize_notion_workspace_sync(session_token, parent_page_id, requester=No
             conn.execute("""INSERT OR REPLACE INTO provider_resources
                          (connection_id,business_id,provider,resource_id,resource_type,title,
                           metadata_json,discovered_at) VALUES(?,?,?,?,?,?,?,?)""",
-                         (connection["id"], actor["business_id"], "notion", page_id, "page",
+                         (connection["id"], business_id, "notion", page_id, "page",
                           key, json.dumps({"managed_by": "tally"}), timestamp))
-    return {"status": "active", "created": True, "parent_page_id": parent_page_id,
-            "workspace_url": _notion_url(parent_page_id), "sections": sorted(sections)}
+    result = {"status": "active", "created": True, "parent_page_id": parent_page_id,
+              "workspace_url": _notion_url(parent_page_id), "sections": sorted(sections)}
+    if backfill:
+        result["backfill"] = sync_notion_business_history(business_id, requester=requester)
+    return result
+
+
+def initialize_notion_workspace_sync(session_token, parent_page_id, requester=None):
+    """Compatibility wrapper for an authenticated Admin-triggered workspace setup."""
+    with tx() as conn:
+        actor = actor_from_token(conn, session_token, "desk")
+        require_role(actor, "admin")
+    return initialize_notion_workspace_for_business(
+        actor["business_id"], parent_page_id, requester=requester, backfill=False)
 
 
 def _workspace_snapshot(business_id):
@@ -465,18 +521,15 @@ def _append_blocks(connection, page_id, blocks, requester=None):
                          {"children": blocks[:100], "notifications": {"mode": "silent"}}, requester)
 
 
-def sync_business_snapshot(session_token, requester=None):
-    """Mirror an already-approved SQL profile/policy snapshot into the merchant workspace."""
+def _sync_business_snapshot_for_business(business_id, requester=None):
     with tx() as conn:
-        actor = actor_from_token(conn, session_token, "desk")
-        require_role(actor, "admin")
-        business = conn.execute("SELECT * FROM businesses WHERE id=?", (actor["business_id"],)).fetchone()
+        business = conn.execute("SELECT * FROM businesses WHERE id=?", (business_id,)).fetchone()
         settings = conn.execute("SELECT * FROM business_settings WHERE business_id=?",
-                                (actor["business_id"],)).fetchone()
-    workspace = _workspace_snapshot(actor["business_id"])
+                                (business_id,)).fetchone()
+    workspace = _workspace_snapshot(business_id)
     if workspace is None:
         return {"status": "not_configured"}
-    connection = load_notion_connection_for_business(actor["business_id"])
+    connection = load_notion_connection_for_business(business_id)
     require(connection is not None, "NOT_CONNECTED", "Notion connection is unavailable")
     timestamp = now()
     profile = json.loads(settings["profile_json"] or "{}")
@@ -492,6 +545,14 @@ def sync_business_snapshot(session_token, requester=None):
     _append_blocks(connection, workspace["activity_page_id"],
                    [_text_block(f"{timestamp} — Approved profile/policies synchronized.")], requester)
     return {"status": "synced", "workspace_url": _notion_url(workspace["parent_page_id"])}
+
+
+def sync_business_snapshot(session_token, requester=None):
+    """Mirror an already-approved SQL profile/policy snapshot into the merchant workspace."""
+    with tx() as conn:
+        actor = actor_from_token(conn, session_token, "desk")
+        require_role(actor, "admin")
+    return _sync_business_snapshot_for_business(actor["business_id"], requester=requester)
 
 
 def _sync_record_page(business_id, record_type, record_id, parent_page_id, title, lines, requester=None):
@@ -519,14 +580,12 @@ def _sync_record_page(business_id, record_type, record_id, parent_page_id, title
     return page_id
 
 
-def sync_product_snapshot(session_token, product_id, requester=None):
+def _sync_product_snapshot_for_business(business_id, product_id, requester=None):
     with tx() as conn:
-        actor = actor_from_token(conn, session_token, "desk")
-        require_role(actor, "admin")
         product = conn.execute("SELECT * FROM products WHERE id=? AND business_id=?",
-                               (product_id, actor["business_id"])).fetchone()
+                               (product_id, business_id)).fetchone()
         require(product is not None, "NOT_FOUND", "Product not found")
-    workspace = _workspace_snapshot(actor["business_id"])
+    workspace = _workspace_snapshot(business_id)
     if workspace is None:
         return {"status": "not_configured"}
     timestamp = now()
@@ -535,9 +594,16 @@ def sync_product_snapshot(session_token, product_id, requester=None):
              f"Stock on hand: {product['stock_on_hand']}",
              f"Reserved: {product['stock_reserved']}",
              f"Low-stock threshold: {product['low_stock_threshold']}"]
-    page_id = _sync_record_page(actor["business_id"], "product", product_id,
+    page_id = _sync_record_page(business_id, "product", product_id,
                                 workspace["catalogue_page_id"], product["name"], lines, requester)
     return {"status": "synced", "record_url": _notion_url(page_id)}
+
+
+def sync_product_snapshot(session_token, product_id, requester=None):
+    with tx() as conn:
+        actor = actor_from_token(conn, session_token, "desk")
+        require_role(actor, "admin")
+    return _sync_product_snapshot_for_business(actor["business_id"], product_id, requester=requester)
 
 
 def sync_order_snapshot(order_id, requester=None):
@@ -553,6 +619,48 @@ def sync_order_snapshot(order_id, requester=None):
     page_id = _sync_record_page(order["business_id"], "order", order_id,
                                 workspace["orders_page_id"], f"Order {order_id}", lines, requester)
     return {"status": "synced", "record_url": _notion_url(page_id)}
+
+
+def sync_support_case_snapshot(case_id, requester=None):
+    """Mirror a customer dispute or inquiry into Activity & Reconciliation."""
+    with tx() as conn:
+        case = conn.execute("SELECT * FROM support_cases WHERE id=?", (case_id,)).fetchone()
+        require(case is not None, "NOT_FOUND", "Support case not found")
+        messages = conn.execute("""SELECT sender_kind,body,created_at FROM support_messages
+                                  WHERE case_id=? ORDER BY created_at""", (case_id,)).fetchall()
+    workspace = _workspace_snapshot(case["business_id"])
+    if workspace is None:
+        return {"status": "not_configured"}
+    lines = [f"Support update — {now()}", f"Type: {case['category']}",
+             f"Status: {case['status']}", f"Opened: {case['opened_at']}"]
+    if case["order_id"]:
+        lines.append(f"Order: {case['order_id']}")
+    lines.extend(f"{message['created_at']} — {message['sender_kind']}: {message['body']}"
+                 for message in messages[-20:])
+    page_id = _sync_record_page(case["business_id"], "support_case", case_id,
+                                workspace["activity_page_id"],
+                                f"Support case {case_id}", lines, requester)
+    return {"status": "synced", "record_url": _notion_url(page_id)}
+
+
+def sync_notion_business_history(business_id, requester=None):
+    """Populate a newly linked workspace from current SQL-authoritative records."""
+    with tx() as conn:
+        product_ids = [row["id"] for row in conn.execute(
+            "SELECT id FROM products WHERE business_id=? ORDER BY name LIMIT 200", (business_id,))]
+        order_ids = [row["id"] for row in conn.execute(
+            "SELECT id FROM orders WHERE business_id=? ORDER BY created_at LIMIT 200", (business_id,))]
+        case_ids = [row["id"] for row in conn.execute(
+            "SELECT id FROM support_cases WHERE business_id=? ORDER BY opened_at LIMIT 200", (business_id,))]
+    _sync_business_snapshot_for_business(business_id, requester=requester)
+    for product_id in product_ids:
+        _sync_product_snapshot_for_business(business_id, product_id, requester=requester)
+    for order_id in order_ids:
+        sync_order_snapshot(order_id, requester=requester)
+    for case_id in case_ids:
+        sync_support_case_snapshot(case_id, requester=requester)
+    return {"profile": 1, "products": len(product_ids), "orders": len(order_ids),
+            "support_cases": len(case_ids)}
 
 
 async def refresh_notion_connection(connection_id, refresher=None):
