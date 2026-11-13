@@ -7,10 +7,10 @@ import logging
 import secrets
 from datetime import datetime,timezone
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from .db import init_db
 from contextlib import asynccontextmanager
-from .business import ingest_verified_payment, ToolFailure
+from .business import ingest_verified_payment, resolve_shop_entry, ToolFailure
 from .mcp import process
 from .paystack_connections import complete_paystack_setup
 from .notion_connections import cancel_notion_oauth, complete_notion_oauth, start_notion_oauth
@@ -53,6 +53,17 @@ app=FastAPI(title='Tally Reconciliation Sandbox',docs_url=None,redoc_url=None,op
 @app.get('/healthz')
 def health():
     return {'status':'ok','service':'tally-mcp','environment':os.getenv('TALLY_ENV','sandbox')}
+
+@app.get('/shop/{shop_slug}')
+def shop_entry(shop_slug:str):
+    try:
+        entry=resolve_shop_entry(shop_slug,os.getenv('TALLY_SHOP_BOUND_SLUG'))
+        return RedirectResponse(entry['agent_url'],status_code=307,headers={
+            'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Robots-Tag':'noindex'})
+    except ToolFailure as exc:
+        status=404 if exc.code in ('SHOP_UNAVAILABLE','SHOP_CONTEXT_MISMATCH') else 503
+        return JSONResponse({'error':exc.code,'message':exc.message},status_code=status,
+                            headers={'Cache-Control':'no-store','X-Robots-Tag':'noindex'})
 
 async def mcp_endpoint(request:Request,channel:str):
     key=os.getenv('TALLY_SHOP_MCP_TOKEN' if channel=='shop' else 'TALLY_DESK_MCP_TOKEN','')

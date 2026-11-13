@@ -4,10 +4,11 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from server.business import ToolFailure, issue_link_code, link_identity, seed
+from server.business import ToolFailure, issue_link_code, link_identity
 from server.db import tx
 from server.paystack_connections import (complete_paystack_setup, issue_paystack_setup_link,
     load_paystack_connection)
+from tests.demo_seed import DEMO_BUSINESS_ID,seed_demo
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +20,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("TALLY_CREDENTIAL_ENCRYPTION_KEY",
                        base64.urlsafe_b64encode(b"E" * 32).decode())
     monkeypatch.setenv("TALLY_CREDENTIAL_ENCRYPTION_KEY_VERSION", "test-v1")
-    seed()
+    seed_demo()
 
 
 async def fake_verify(_key):
@@ -39,7 +40,7 @@ def test_credentials_are_encrypted_per_business_and_setup_is_single_use():
         token, "rk_test_business_one", "whsec_business_one", verifier=fake_verify
     ))
     loaded = load_paystack_connection(result["connection_id"])
-    assert loaded["business_id"] == "sandbox-cedar-bakes"
+    assert loaded["business_id"] == DEMO_BUSINESS_ID
     assert loaded["credentials"]["restricted_key"] == "rk_test_business_one"
     assert loaded["credentials"]["webhook_secret"] == "whsec_business_one"
     with tx() as conn:
@@ -64,7 +65,7 @@ def test_two_businesses_get_distinct_connection_records():
         setup_token("staff-two"), "rk_test_business_two", "whsec_business_two", verifier=fake_verify
     ))
     assert first["connection_id"] != second["connection_id"]
-    assert load_paystack_connection(first["connection_id"])["business_id"] == "sandbox-cedar-bakes"
+    assert load_paystack_connection(first["connection_id"])["business_id"] == DEMO_BUSINESS_ID
     assert load_paystack_connection(second["connection_id"])["business_id"] == "business-two"
 
 

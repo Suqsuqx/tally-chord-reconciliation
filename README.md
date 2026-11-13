@@ -9,7 +9,9 @@ This repository is an assessment sandbox, not a production payment or identity s
 ## What is actually implemented
 
 - Additive multi-tenant SQLite schema with conversational sandbox merchant registration, sender-to-business routing and tenant-scoped customers. A registration message creates a new empty business; approved business data and catalogue arrive afterward through chat, files or Notion.
-- Tally starts with no runtime merchant, catalogue or customer-facing business identity. Shop requires an active merchant context; Cedar Bakes exists only as an explicitly seeded regression fixture in isolated tests.
+- Tally starts with no runtime merchant, catalogue or customer-facing business identity. Shop requires an active merchant context; isolated tests create their own generic fixture outside runtime modules.
+- Desk derives an arbitrary business name from the merchant's message and creates an empty private tenant. Each Shop MCP deployment is server-bound to exactly one configured slug, so its customer teammate cannot select or switch merchants.
+- Successful activation returns a stable `/shop/{slug}` entry URL. That route exists only while the bound business is active and redirects to the configured customer channel (the TSG simulator for this assessment; a verified WhatsApp target in a live adapter).
 - Shop and Desk JSON-RPC Streamable HTTP MCP endpoints with distinct bearer authentication and tool allowlists.
 - Server-side Admin/Operator/Customer rules with legacy one-time codes plus explicit **unverified simulator sender routing**. The live contract remains authenticated WhatsApp-number identity; typed numbers are never authorization.
 - Stock reservation, idempotent order creation, signed sandbox payment events (not customer-visible MCP), reconciliation report, merchant catch-up, low-stock alerts, order status and case-specific customer support.
@@ -84,6 +86,8 @@ The script prints names, enabled state, scope checks, health and tool names; it 
 Sandbox only. No live merchant data, real WhatsApp numbers, production payment keys or channel-bound identity attestation. Chord API/external-chat tool calls were observed, but that does not substitute for the still-pending Channel simulator UI recording or native handoff proof. A stored support reply is not proof of customer delivery.
 
 Provider code is disabled unless its explicit feature flag is enabled. Merchant Paystack credentials go only through the HTTPS form and are encrypted per business; Notion uses Tally's OAuth client and encrypted per-business tokens. Conversational registration, document approval, provider setup and Shop activation extend the existing tools without changing the seven-Shop/eleven-Desk counts. Source tests are not live-provider proof; see `docs/PROVIDER_CONNECTIONS.md` for activation gates.
+
+`TALLY_SHOP_BOUND_SLUG` and `TALLY_SHOP_AGENT_URL` are deployment-level channel bindings, not merchant data defaults. One Shop agent instance must have one bound active business. Desk remains generic and can register other businesses, but each additional customer-facing Shop channel needs its own authenticated adapter binding before it is reachable.
 
 ## AI usage declaration
 

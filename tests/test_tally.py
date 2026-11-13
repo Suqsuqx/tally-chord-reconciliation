@@ -8,10 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 from server.app import app,mcp_context_shape
 from server.db import tx
-from server.business import (seed,issue_link_code,link_identity,get_catalog,upsert_product,
+from server.business import (issue_link_code,link_identity,get_catalog,upsert_product,
     create_order,record_payment_claim,get_my_order,get_reconciliation_report,get_inventory_alerts,
     get_merchant_catchup,update_order_status,create_support_case,list_support_cases,
     reply_support_case,get_my_support_case,ToolFailure,record_stock_adjustment)
+from tests.demo_seed import DEMO_BUSINESS_ID,seed_demo
 
 @pytest.fixture(autouse=True)
 def setup(tmp_path,monkeypatch):
@@ -20,12 +21,12 @@ def setup(tmp_path,monkeypatch):
     monkeypatch.setenv('TALLY_SHOP_MCP_TOKEN','SHOP_SUPER_LONG_RANDOM_TEST_SECRET')
     monkeypatch.setenv('TALLY_DESK_MCP_TOKEN','DESK_OTHER_LONG_RANDOM_TEST_SECRET')
     monkeypatch.setenv('TALLY_WEBHOOK_SECRET','WEBHOOK_LONG_RANDOM_TEST_SECRET')
-    seed()
+    seed_demo()
 
 def sess(actor,channel):return link_identity(issue_link_code(actor),channel)['session_token']
 
 def pay_http(order_id, amount_minor, event_id=None, invalid=False, currency="NGN"):
-    event={'event_id':event_id or uuid.uuid4().hex,'business_id':'sandbox-cedar-bakes','reference':order_id,'amount_minor':amount_minor,'currency':currency,'event_status':'success'}
+    event={'event_id':event_id or uuid.uuid4().hex,'business_id':DEMO_BUSINESS_ID,'reference':order_id,'amount_minor':amount_minor,'currency':currency,'event_status':'success'}
     body=json.dumps(event,separators=(',',':')).encode()
     ts=str(int(time.time()))
     sig='sha256='+hmac.new(os.environ['TALLY_WEBHOOK_SECRET'].encode(),ts.encode()+b'.'+body,hashlib.sha256).hexdigest()
@@ -54,15 +55,15 @@ def test_mcp_context_shape_records_names_not_values():
 
 def test_app_startup_does_not_seed_a_default_merchant():
     with tx() as conn:
-        conn.execute("DELETE FROM products WHERE business_id='sandbox-cedar-bakes'")
-        conn.execute("DELETE FROM actors WHERE business_id='sandbox-cedar-bakes'")
-        conn.execute("DELETE FROM business_settings WHERE business_id='sandbox-cedar-bakes'")
-        conn.execute("DELETE FROM businesses WHERE id='sandbox-cedar-bakes'")
+        conn.execute("DELETE FROM products WHERE business_id=?",(DEMO_BUSINESS_ID,))
+        conn.execute("DELETE FROM actors WHERE business_id=?",(DEMO_BUSINESS_ID,))
+        conn.execute("DELETE FROM business_settings WHERE business_id=?",(DEMO_BUSINESS_ID,))
+        conn.execute("DELETE FROM businesses WHERE id=?",(DEMO_BUSINESS_ID,))
     with TestClient(app) as client:
         assert client.get('/healthz').status_code == 200
     with tx() as conn:
         assert conn.execute(
-            "SELECT COUNT(*) FROM businesses WHERE id='sandbox-cedar-bakes'"
+            "SELECT COUNT(*) FROM businesses WHERE id=?",(DEMO_BUSINESS_ID,)
         ).fetchone()[0] == 0
 
 def test_two_roles_restrict_data_and_edits():
@@ -81,13 +82,13 @@ def test_two_roles_restrict_data_and_edits():
 
 def test_catalog_stock_and_order_idempotency():
     customer=sess('cust-ada','shop')
-    assert next(p for p in get_catalog(shop_slug='cedar-bakes')['products'] if p['id']=='cup-vanilla')['available'] is False
+    assert next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products'] if p['id']=='cup-vanilla')['available'] is False
     with pytest.raises(ToolFailure) as e:create_order(customer,[{'product_id':'cup-vanilla','quantity':1}],'req-two')
     assert e.value.code=='OUT_OF_STOCK'
     order=create_order(customer,[{'product_id':'cup-choc','quantity':2}],'req-three')
     same=create_order(customer,[{'product_id':'cup-choc','quantity':2}],'req-three')
     assert same['duplicate'] and same['order_id']==order['order_id']
-    p=next(p for p in get_catalog(shop_slug='cedar-bakes')['products'] if p['id']=='cup-choc')
+    p=next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products'] if p['id']=='cup-choc')
     assert p['available_qty']==12
     assert order['total_minor']==500000
 
@@ -156,7 +157,7 @@ def test_mcp_discovery_role_isolation_and_real_tool_invocation():
     result=json.loads(called['result']['content'][0]['text'])
     assert called['result']['isError'] is True
     assert result['error']=='SHOP_CONTEXT_REQUIRED'
-    scoped=client.post('/mcp/shop',headers=shop_h,json={'jsonrpc':'2.0','id':6,'method':'tools/call','params':{'name':'get_catalog','arguments':{'shop_slug':'cedar-bakes'}}}).json()
+    scoped=client.post('/mcp/shop',headers=shop_h,json={'jsonrpc':'2.0','id':6,'method':'tools/call','params':{'name':'get_catalog','arguments':{'shop_slug':'test-merchant-fixture'}}}).json()
     scoped_result=json.loads(scoped['result']['content'][0]['text'])
     assert any(x['id']=='cup-choc' for x in scoped_result['products'])
     blocked=client.post('/mcp/shop',headers=shop_h,json={'jsonrpc':'2.0','id':5,'method':'tools/call','params':{'name':'get_reconciliation_report','arguments':{}}}).json()

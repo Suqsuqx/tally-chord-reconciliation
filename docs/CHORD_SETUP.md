@@ -8,6 +8,8 @@
 
 Upload/publish `skills/tally-shop/SKILL.md` to Shop, and `skills/tally-desk/SKILL.md` to Desk. Verify the correct file is marked **Instructions**, save/review/publish, and activate the teammates.
 
+Configure each customer-facing Shop MCP deployment with exactly one server-side business binding. For the assessment instance, set `TALLY_SHOP_BOUND_SLUG` to the activated merchant slug and `TALLY_SHOP_AGENT_URL` to the HTTPS TSG simulator/channel entry. These values belong in private deployment configuration, not the skill, chat or merchant record. Desk stays generic and extracts the requested business name from each registration message. A second merchant must receive a separate authenticated Shop channel binding; customers must never select a store through Shop tool arguments.
+
 ## MCP
 
 The two remote servers have intentionally different names, URLs and secrets:

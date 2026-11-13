@@ -4,13 +4,16 @@ import json
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from fastapi.testclient import TestClient
 
 import server.paystack_connections as paystack
-from server.business import (BUSINESS_ID, ToolFailure, create_order, get_catalog,
+from server.app import app
+from server.business import (ToolFailure, create_order, get_catalog,
     get_my_order, get_reconciliation_report, link_identity, record_payment_claim,
-    seed, update_order_status, upsert_product)
+    update_order_status, upsert_product)
 from server.db import tx
 from server.mcp import process
+from tests.demo_seed import DEMO_BUSINESS_ID,seed_demo
 
 
 @pytest.fixture(autouse=True)
@@ -18,12 +21,14 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("TALLY_DB_PATH", str(tmp_path / "tally.db"))
     monkeypatch.setenv("TALLY_ENV", "sandbox")
     monkeypatch.setenv("TALLY_PUBLIC_BASE_URL", "https://tally.example")
+    monkeypatch.setenv("TALLY_SHOP_BOUND_SLUG", "asyan-shop")
+    monkeypatch.setenv("TALLY_SHOP_AGENT_URL", "https://chat.example/asyan-agent")
     monkeypatch.setenv("TALLY_PAYSTACK_CONNECTIONS_ENABLED", "true")
     monkeypatch.setenv("TALLY_NOTION_CONNECTIONS_ENABLED", "false")
     monkeypatch.setenv("TALLY_CREDENTIAL_ENCRYPTION_KEY",
                        base64.urlsafe_b64encode(b"O" * 32).decode())
     monkeypatch.setenv("TALLY_CREDENTIAL_ENCRYPTION_KEY_VERSION", "test-v1")
-    seed()
+    seed_demo()
 
 
 def register_owner(**extra):
@@ -39,7 +44,7 @@ def product_id(session_token, name):
 
 def test_conversational_registration_creates_empty_business():
     owner = register_owner(profile={"description": "Sandbox merchant"})
-    assert owner["business_id"] != BUSINESS_ID
+    assert owner["business_id"] != DEMO_BUSINESS_ID
     assert owner["business_name"] == "ASYAN SHOP"
     assert owner["shop_slug"] == "asyan-shop"
     assert owner["shop_status"] == "onboarding"
@@ -55,7 +60,32 @@ def test_conversational_registration_creates_empty_business():
     assert resumed["catalogue"] == {"product_count": 0}
     with tx() as conn:
         assert conn.execute("SELECT COUNT(*) FROM businesses WHERE name='ASYAN SHOP'").fetchone()[0] == 1
-        assert conn.execute("SELECT name FROM businesses WHERE id=?", (BUSINESS_ID,)).fetchone()[0] == "Cedar Bakes (sandbox)"
+        assert conn.execute("SELECT name FROM businesses WHERE id=?", (DEMO_BUSINESS_ID,)).fetchone()[0] == "Test Merchant Fixture"
+
+
+def test_unscripted_business_name_is_preserved_and_slugged():
+    owner = link_identity(
+        channel="desk", sender_identity="sim-owner-kora", display_name="Kora owner",
+        business_name="Kora Books and Gifts",
+    )
+    assert owner["business_name"] == "Kora Books and Gifts"
+    assert owner["shop_slug"] == "kora-books-and-gifts"
+    assert owner["shop_status"] == "onboarding"
+    assert owner["catalogue"] == {"product_count": 0}
+
+
+def test_other_merchant_cannot_activate_through_existing_shop_agent():
+    owner = link_identity(
+        channel="desk", sender_identity="sim-owner-kora", display_name="Kora owner",
+        business_name="Kora Books and Gifts",
+        manual_bank={"bank_name": "Sandbox Bank", "account_name": "Kora Books and Gifts",
+                     "account_number": "0123456789"},
+    )
+    upsert_product(owner["session_token"], "Notebook", 350000, 8, 2)
+    with pytest.raises(ToolFailure) as error:
+        link_identity(channel="desk", sender_identity="sim-owner-kora",
+                      business_slug="kora-books-and-gifts", activate_shop=True)
+    assert error.value.code == "SHOP_CHANNEL_UNAVAILABLE"
 
 
 def test_serialized_profile_and_policies_are_validated_and_saved():
@@ -135,6 +165,10 @@ def test_manual_bank_shop_activation_customer_order_claim_and_admin_confirmation
     assert launched["onboarding"]["status"] == "active"
     assert launched["business_profile"] == {}
     assert launched["policies"] == []
+    assert owner["shop_access"] == {
+        "status": "active", "shop_slug": "asyan-shop",
+        "entry_url": "https://tally.example/shop/asyan-shop",
+    }
     customer = link_identity(channel="shop", sender_identity="sim-customer-one",
                              display_name="Test customer", business_slug="asyan-shop")
     order = create_order(customer["session_token"],
@@ -183,6 +217,63 @@ def test_existing_customer_session_stops_when_shop_is_deactivated():
     with pytest.raises(ToolFailure) as error:
         get_catalog(channel="shop", session_token=customer["session_token"])
     assert error.value.code == "SHOP_UNAVAILABLE"
+
+
+def test_bound_shop_mcp_injects_one_business_and_rejects_store_switch(monkeypatch):
+    owner = register_owner(
+        manual_bank={"bank_name": "Sandbox Bank", "account_name": "ASYAN SHOP TEST",
+                     "account_number": "0123456789"},
+    )
+    upsert_product(owner["session_token"], "Brownie box", 650000, 5, 3)
+    link_identity(channel="desk", sender_identity="sim-owner-asyan",
+                  business_slug="asyan-shop", activate_shop=True)
+    monkeypatch.setenv("TALLY_SHOP_BOUND_SLUG", "asyan-shop")
+
+    linked_response = process("shop", {
+        "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+        "params": {"name": "link_identity", "arguments": {
+            "sender_identity": "sim-bound-customer",
+        }},
+    })
+    linked = json.loads(linked_response["result"]["content"][0]["text"])
+    assert linked["business_name"] == "ASYAN SHOP"
+    assert linked["shop_slug"] == "asyan-shop"
+
+    catalog_response = process("shop", {
+        "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+        "params": {"name": "get_catalog", "arguments": {}},
+    })
+    catalog = json.loads(catalog_response["result"]["content"][0]["text"])
+    assert catalog["business"] == "ASYAN SHOP"
+
+    mismatch_response = process("shop", {
+        "jsonrpc": "2.0", "id": 23, "method": "tools/call",
+        "params": {"name": "link_identity", "arguments": {
+            "sender_identity": "sim-store-switch", "business_slug": "another-shop",
+        }},
+    })
+    mismatch = json.loads(mismatch_response["result"]["content"][0]["text"])
+    assert mismatch_response["result"]["isError"] is True
+    assert mismatch["error"] == "SHOP_CONTEXT_MISMATCH"
+
+
+def test_shop_entry_redirect_exists_only_after_bound_business_activation(monkeypatch):
+    monkeypatch.setenv("TALLY_SHOP_BOUND_SLUG", "asyan-shop")
+    monkeypatch.setenv("TALLY_SHOP_AGENT_URL", "https://chat.example/asyan-agent")
+    with TestClient(app) as client:
+        assert client.get("/shop/asyan-shop", follow_redirects=False).status_code == 404
+    owner = register_owner(
+        manual_bank={"bank_name": "Sandbox Bank", "account_name": "ASYAN SHOP TEST",
+                     "account_number": "0123456789"},
+    )
+    upsert_product(owner["session_token"], "Brownie box", 650000, 5, 3)
+    link_identity(channel="desk", sender_identity="sim-owner-asyan",
+                  business_slug="asyan-shop", activate_shop=True)
+    with TestClient(app) as client:
+        response = client.get("/shop/asyan-shop", follow_redirects=False)
+        assert response.status_code == 307
+        assert response.headers["location"] == "https://chat.example/asyan-agent"
+        assert client.get("/shop/another-shop", follow_redirects=False).status_code == 404
 
 
 async def fake_write_verify(_key):

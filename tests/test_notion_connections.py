@@ -7,13 +7,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.app import app
-from server.business import ToolFailure, issue_link_code, link_identity, seed, upsert_product
+from server.business import ToolFailure, issue_link_code, link_identity, upsert_product
 from server.db import tx
 from server.notion_connections import (cancel_notion_oauth, complete_notion_oauth, discover_authorized_resources,
     issue_notion_setup_link,
     initialize_notion_workspace_sync, load_notion_connection_for_business, preview_notion_resource,
     refresh_notion_connection, start_notion_oauth, sync_business_snapshot, sync_product_snapshot)
 from server.mcp import process
+from tests.demo_seed import DEMO_BUSINESS_ID,seed_demo
 
 
 @pytest.fixture(autouse=True)
@@ -29,7 +30,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("TALLY_CREDENTIAL_ENCRYPTION_KEY",
                        base64.urlsafe_b64encode(b"N" * 32).decode())
     monkeypatch.setenv("TALLY_CREDENTIAL_ENCRYPTION_KEY_VERSION", "test-v1")
-    seed()
+    seed_demo()
 
 
 def desk_session(actor_id="staff-eni"):
@@ -76,7 +77,7 @@ def test_oauth_tokens_are_encrypted_and_setup_and_state_are_single_use():
     result = asyncio.run(complete_notion_oauth(
         "authorization-code", state, exchanger=fake_exchange, discoverer=fake_discovery
     ))
-    loaded = load_notion_connection_for_business("sandbox-cedar-bakes")
+    loaded = load_notion_connection_for_business(DEMO_BUSINESS_ID)
     assert loaded["id"] == result["connection_id"]
     assert loaded["credentials"]["access_token"] == "ntn_access_authorization-code"
     assert result["workspace_name"] == "ASYAN SHOP"
@@ -153,7 +154,7 @@ def test_admin_only_setup_and_two_businesses_have_distinct_connections():
         "second-authorization", second_state, exchanger=second_exchange, discoverer=fake_discovery
     ))
     assert first["connection_id"] != second["connection_id"]
-    assert load_notion_connection_for_business("sandbox-cedar-bakes")["credentials"]["access_token"].startswith("ntn_access_")
+    assert load_notion_connection_for_business(DEMO_BUSINESS_ID)["credentials"]["access_token"].startswith("ntn_access_")
     assert load_notion_connection_for_business("business-two")["credentials"]["access_token"] == "ntn_access_second"
 
 
@@ -336,9 +337,10 @@ def test_admin_can_create_and_update_merchant_readable_notion_workspace():
 
     with tx() as conn:
         conn.execute("""UPDATE business_settings SET profile_json=?,policies_json=?
-                     WHERE business_id='sandbox-cedar-bakes'""",
+                     WHERE business_id=?""",
                      (json.dumps({"description": "Friendly neighbourhood bakery"}),
-                      json.dumps([{"question": "Delivery?", "answer": "Same-day in the test area."}])))
+                      json.dumps([{"question": "Delivery?", "answer": "Same-day in the test area."}]),
+                      DEMO_BUSINESS_ID))
     assert sync_business_snapshot(session, requester=requester)["status"] == "synced"
 
     product = upsert_product(session, "Approved cupcake", 250000, 12, 3)

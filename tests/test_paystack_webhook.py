@@ -10,11 +10,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.app import app
-from server.business import create_order, issue_link_code, link_identity, seed
+from server.business import create_order, issue_link_code, link_identity
 from server.paystack_connections import (complete_paystack_setup, issue_paystack_setup_link,
     register_payment_reference)
 from server.paystack_webhook import (SignatureRejected, parse_test_charge,
     verify_legacy_signature, verify_modern_signature)
+from tests.demo_seed import DEMO_BUSINESS_ID,seed_demo
 
 
 WEBHOOK_SECRET = "whsec_demo_signing_secret"
@@ -32,7 +33,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("TALLY_SHOP_MCP_TOKEN", "SHOP_SUPER_LONG_RANDOM_TEST_SECRET")
     monkeypatch.setenv("TALLY_DESK_MCP_TOKEN", "DESK_OTHER_LONG_RANDOM_TEST_SECRET")
     monkeypatch.setenv("TALLY_WEBHOOK_SECRET", "WEBHOOK_LONG_RANDOM_TEST_SECRET")
-    seed()
+    seed_demo()
 
 
 async def fake_verify(_key):
@@ -84,7 +85,7 @@ def test_business_routed_webhook_accepts_exact_charge_once():
     customer = link_identity(issue_link_code("cust-ada"), "shop")["session_token"]
     order = create_order(customer, [{"product_id": "cup-choc", "quantity": 2}], "paystack-001")
     provider_reference = "ASYAN-test-reference-001"
-    register_payment_reference(connection["connection_id"], "sandbox-cedar-bakes",
+    register_payment_reference(connection["connection_id"], DEMO_BUSINESS_ID,
                                order["order_id"], provider_reference)
     event = {"event": "charge.success", "data": {"id": 5678901, "reference": provider_reference,
              "amount": order["total_minor"], "currency": "NGN", "domain": "test", "status": "success"}}

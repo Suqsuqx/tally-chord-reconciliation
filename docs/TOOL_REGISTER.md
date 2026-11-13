@@ -6,8 +6,8 @@ Each tool is exposed through **one** of two authenticated public HTTPS endpoints
 
 | Tool | Private? | Outcome |
 |---|---:|---|
-| `link_identity` | Shop context | Route an unverified simulator sender to an active merchant slug (legacy codes remain for regression tests). |
-| `get_catalog` | Active shop/session | Tenant-scoped approved profile/policies, products, prices and availability. There is no default Tally catalogue. |
+| `link_identity` | Server-bound Shop context | Route an unverified simulator sender to the one active business bound to this Shop MCP instance. Merchant selection is not exposed to the model or customer. |
+| `get_catalog` | Bound active Shop/session | Tenant-scoped approved profile/policies, products, prices and availability. The server injects the binding; there is no Tally-wide catalogue or store selector. |
 | `create_order` | Customer session | Recheck stock, reserve units and return manual-bank instructions or initialize Paystack TEST checkout idempotently. |
 | `get_my_order` | Customer session | Customer-owned order and status only. |
 | `record_payment_claim` | Customer session | Record the claim, then independently verify a mapped Paystack transaction; otherwise remain unverified. |
@@ -31,6 +31,8 @@ Each tool is exposed through **one** of two authenticated public HTTPS endpoints
 | `reply_support_case` | Both | Case-scoped recorded merchant response, delivery not presumed. |
 
 When a sandbox Admin registers or resumes through `link_identity` and a provider feature is enabled, the result includes short-lived private setup links. Operators never receive them. The same seven/eleven tool counts are preserved.
+
+When activation succeeds, the Desk result includes `shop_access.status`, `shop_access.shop_slug` and a stable `shop_access.entry_url` derived from `TALLY_PUBLIC_BASE_URL`. `GET /shop/{slug}` redirects to `TALLY_SHOP_AGENT_URL` only when the requested slug matches this deployment's `TALLY_SHOP_BOUND_SLUG` and that business is active. Inactive, missing or different businesses remain unavailable.
 
 ## Provider-only, not an MCP tool
 

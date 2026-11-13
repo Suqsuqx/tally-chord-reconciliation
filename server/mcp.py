@@ -1,7 +1,7 @@
 """Minimal stateless MCP Streamable HTTP transport. Responses use JSON-RPC over HTTPS."""
 import json
 import os
-from .business import invoke, ToolFailure
+from .business import bind_shop_call, invoke, ToolFailure
 
 # Tools must use exact public names below; per-server allowlists are enforced twice.
 S=lambda desc,props,required=[]:{'description':desc,'inputSchema':{'type':'object','properties':props,'required':required,'additionalProperties':False}}
@@ -13,8 +13,8 @@ POLICIES={'type':'array','items':{'type':'object','properties':{'question':P('Po
 MANUAL_BANK={'type':'object','properties':{'bank_name':P('Bank name'),'account_name':P('Account name'),'account_number':P('Account number')},'required':['bank_name','account_name','account_number'],'additionalProperties':False}
 NOTION_WORKSPACE={'type':'object','description':'Admin-approved Notion parent page where Tally may create and maintain the merchant workspace.','properties':{'parent_page_id':P('Authorized blank or existing Notion page ID'),'approved':P('Must be true after the Admin approves Tally creating its workspace','boolean')},'required':['parent_page_id','approved'],'additionalProperties':False}
 SHOP={
- 'link_identity':S('Route a sandbox customer into one active merchant shop using simulator sender context, or redeem a legacy test code. Never display returned session token.',{'code':P('Optional legacy one-time code'),'sender_identity':SENDER,'display_name':P('Customer display name'),'business_slug':P('Shop identifier from merchant storefront context')}),
- 'get_catalog':S('Current tenant-scoped prices and availability from SQL, not knowledge files. Requires a customer session or an active merchant shop identifier; there is no default shop.',{'session_token':TOKEN,'shop_slug':P('Active merchant shop identifier when no customer session exists')}),
+ 'link_identity':S('Route a sandbox customer into the one active merchant bound to this Shop instance using simulator sender context. The server supplies business context; customers cannot select a merchant. Never display the returned session token.',{'sender_identity':SENDER,'display_name':P('Customer display name')}),
+ 'get_catalog':S('Current bound-tenant prices and availability from SQL, not knowledge files. Requires the server-bound active Shop or a customer session from it; there is no model-selected merchant.',{'session_token':TOKEN}),
  'create_order':S('Create order for linked customer; server rechecks stock and calculates total. Reuse request_id on retries.',
        {'session_token':TOKEN,'items':{'type':'array','items':{'type':'object','properties':{'product_id':P('Catalog item ID'),'quantity':P('Positive quantity','integer')},'required':['product_id','quantity']}},'request_id':P('Unique idempotency key stable for retry'),'payment_email':P('Customer email required only for hosted Paystack checkout')},['session_token','items','request_id']),
  'get_my_order':S('Get order only if owned by linked customer.',{'session_token':TOKEN,'order_id':P('Order reference')},['session_token','order_id']),
@@ -123,6 +123,8 @@ def process(channel,body):
         if name not in ALL[channel]:
             return {'jsonrpc':'2.0','id':request_id,'result':{'isError':True,'content':[{'type':'text','text':json.dumps({'error':'FORBIDDEN','message':'Tool not enabled'})}]}}
         try:
+            if channel=='shop':
+                args=bind_shop_call(name,args,os.getenv('TALLY_SHOP_BOUND_SLUG'))
             result=invoke(channel,name,args)
             result=_sync_approved_notion_data(channel,name,args,result)
             result=_attach_admin_setup_links(channel,name,result)

@@ -12,7 +12,7 @@ Tally is a WhatsApp-first business operations assistant that keeps merchant orde
 
 ## 2. Experience, actors and permissions
 
-Two separately configured Chord teammates work with sandbox merchants in one multi-tenant database and explicit tool scopes. A merchant is created conversationally; Cedar Bakes remains only a legacy regression fixture.
+Two separately configured Chord teammates work with sandbox merchants in one multi-tenant database and explicit tool scopes. A merchant is created conversationally; runtime code contains no default merchant or catalogue.
 
 | Teammate / actor | Purpose and accessible operations |
 |---|---|
@@ -27,6 +27,8 @@ Multiple individual staff may hold Admin or Operator roles. Business membership,
 ## 3. Merchant setup and catalogue
 
 The assessment begins when the merchant messages Tally Desk to register a business. That message creates an empty tenant and assigns the current simulator sender as its sandbox Admin; it does not claim or copy a pre-registered business. The Admin then supplies business details and catalogue through conversation, uploaded files or authorized Notion documents. Tally previews names, prices, stock counts and warning thresholds before approved writes. An empty authorized Notion parent can also become a merchant-readable Tally workspace with Profile, Catalogue, Policies & FAQ, Orders, and Activity & Reconciliation sections. SQL remains authoritative and approved records are mirrored to Notion. The API accepts NGN amounts as integer **kobo** and calculates available quantity as physical stock on hand minus units reserved on existing orders. The customer agent reads the same persisted catalogue, and order creation rechecks availability transactionally.
+
+Desk is business-name agnostic: it derives the exact requested name and creates that tenant. A customer-facing Shop instance is not a marketplace. Its MCP deployment is bound server-side to one activated business, exposes no merchant selector, and returns a stable entry URL after activation. The assessment Shop binding points to the single simulator agent; a live adapter would bind an equivalent business-specific link or verified WhatsApp route.
 
 ## 4. Customer order and payment reconciliation
 

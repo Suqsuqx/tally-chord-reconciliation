@@ -8,8 +8,6 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from .db import tx, rowdict
 
-BUSINESS_ID = 'sandbox-cedar-bakes'
-
 class ToolFailure(Exception):
     def __init__(self, code, message):
         self.code, self.message = code, message
@@ -32,35 +30,6 @@ def require(cond, code, message):
     if not cond:
         raise ToolFailure(code, message)
 
-def seed():
-    """Create the isolated Cedar regression fixture used by tests only."""
-    with tx() as c:
-        c.execute('INSERT OR IGNORE INTO businesses VALUES(?,?,?)', (BUSINESS_ID, 'Cedar Bakes (sandbox)', 'NGN'))
-        timestamp=now()
-        c.execute('''INSERT OR IGNORE INTO business_settings
-                     (business_id,shop_slug,onboarding_status,profile_json,policies_json,payment_method,
-                      bank_details_json,created_at,updated_at)
-                     VALUES(?,?,?,'{}','[]',NULL,NULL,?,?)''',
-                  (BUSINESS_ID,'cedar-bakes','active',timestamp,timestamp))
-        for a in [
-            ('cust-ada','customer','customer','Ada (test customer)'),
-            ('cust-bola','customer','customer','Bola (test customer)'),
-            ('staff-eni','staff','admin','Eni (test Admin)'),
-            ('staff-tola','staff','operator','Tola (test Operator)'),
-            ('staff-femi','staff','operator','Femi (test Operator)'),
-        ]:
-            c.execute('INSERT OR IGNORE INTO actors (id,business_id,kind,role,display_name) VALUES(?,?,?,?,?)',
-                      (a[0],BUSINESS_ID,a[1],a[2],a[3]))
-        for item in [
-            ('cup-choc','Chocolate cupcake',250000,14,3),
-            ('cup-vanilla','Vanilla cupcake',200000,0,3),
-            ('brownie','Brownie box',650000,5,2),
-        ]:
-            c.execute('''INSERT OR IGNORE INTO products
-                    (id,business_id,name,price_minor,stock_on_hand,stock_reserved,low_stock_threshold,active,updated_at)
-                    VALUES(?,?,?,?,?,0,?,1,?)''',
-                    (item[0],BUSINESS_ID,item[1],item[2],item[3],item[4],now()))
-
 def issue_link_code(actor_id, ttl_minutes=10):
     require(os.getenv('TALLY_ENV','sandbox')=='sandbox','SANDBOX_ONLY','Demo codes are disabled outside sandbox')
     with tx() as c:
@@ -75,6 +44,16 @@ def _slug(value):
     value=re.sub(r'[^a-z0-9]+','-',str(value or '').strip().lower()).strip('-')
     require(2<=len(value)<=60,'INVALID_INPUT','Provide a valid business shop name or slug')
     return value
+
+def _shop_access(shop_slug,onboarding_status):
+    result={'status':onboarding_status,'shop_slug':shop_slug}
+    if onboarding_status=='active':
+        base=os.getenv('TALLY_PUBLIC_BASE_URL','').strip().rstrip('/')
+        bound=os.getenv('TALLY_SHOP_BOUND_SLUG','').strip()
+        target=os.getenv('TALLY_SHOP_AGENT_URL','').strip()
+        if base and bound and _slug(bound)==shop_slug and target.startswith('https://'):
+            result['entry_url']=f'{base}/shop/{shop_slug}'
+    return result
 
 def _sender_hash(sender_identity):
     require(isinstance(sender_identity,str) and 3<=len(sender_identity.strip())<=200,
@@ -94,6 +73,7 @@ def _issue_session(c,actor,registration_status='resumed'):
     return {'session_token':session,'role':actor['role'],'business_id':actor['business_id'],
             'business_name':business['name'],'shop_slug':settings['shop_slug'] if settings else None,
             'shop_status':settings['onboarding_status'] if settings else 'onboarding',
+            'shop_access':_shop_access(settings['shop_slug'],settings['onboarding_status']) if settings else None,
             'registration_status':registration_status,
             'catalogue':{'product_count':product_count},
             'expires_at':expires,
@@ -167,6 +147,11 @@ def _configure_business(c,actor,profile=None,policies=None,manual_bank=None,acti
         payment_ready=(current['payment_method']=='manual_bank' and current['bank_details_json']) or provider is not None
         require(products>0,'ONBOARDING_INCOMPLETE','Add at least one approved product before activation')
         require(bool(payment_ready),'ONBOARDING_INCOMPLETE','Connect Paystack or add manual bank details before activation')
+        bound_slug=os.getenv('TALLY_SHOP_BOUND_SLUG','').strip()
+        agent_url=os.getenv('TALLY_SHOP_AGENT_URL','').strip()
+        require(bound_slug and _slug(bound_slug)==settings['shop_slug'] and
+                agent_url.startswith('https://'),'SHOP_CHANNEL_UNAVAILABLE',
+                'Provision this business-specific Tally Shop channel before activation')
         method='paystack' if provider is not None else 'manual_bank'
         c.execute('''UPDATE business_settings SET onboarding_status='active',payment_method=?,updated_at=?
                      WHERE business_id=?''',(method,now(),actor['business_id']))
@@ -254,6 +239,49 @@ def actor_from_token(conn, token, channel):
                                AND onboarding_status='active'""",(a['business_id'],)).fetchone()
         require(active is not None,'SHOP_UNAVAILABLE','This shop is not active')
     return a
+
+def bind_shop_call(name,args,bound_shop_slug=None):
+    """Apply a server-controlled single-business binding to one Shop MCP instance."""
+    params=dict(args or {})
+    if not bound_shop_slug:
+        return params
+    bound=_slug(bound_shop_slug)
+    slug_field='shop_slug' if name=='get_catalog' else 'business_slug'
+    supplied=params.get(slug_field)
+    if supplied is not None:
+        require(_slug(supplied)==bound,'SHOP_CONTEXT_MISMATCH',
+                'This Tally Shop belongs to a different business')
+    if name=='link_identity':
+        require(not params.get('code'),'SHOP_CONTEXT_MISMATCH',
+                'Legacy actor codes cannot select this bound Tally Shop')
+        params['business_slug']=bound
+    elif name=='get_catalog' and not params.get('session_token'):
+        params['shop_slug']=bound
+    token=params.get('session_token')
+    if token:
+        with tx() as conn:
+            actor=actor_from_token(conn,token,'shop')
+            settings=conn.execute('SELECT shop_slug FROM business_settings WHERE business_id=?',
+                                  (actor['business_id'],)).fetchone()
+            require(settings is not None and settings['shop_slug']==bound,
+                    'SHOP_CONTEXT_MISMATCH','This customer session belongs to a different business')
+    return params
+
+def resolve_shop_entry(shop_slug,bound_shop_slug=None):
+    """Resolve a public entry only for an active shop served by this instance."""
+    slug=_slug(shop_slug)
+    if bound_shop_slug:
+        require(slug==_slug(bound_shop_slug),'SHOP_UNAVAILABLE','This shop is not available here')
+    with tx() as conn:
+        row=conn.execute('''SELECT b.name,s.shop_slug,s.onboarding_status
+                            FROM business_settings s JOIN businesses b ON b.id=s.business_id
+                            WHERE s.shop_slug=?''',(slug,)).fetchone()
+        require(row is not None and row['onboarding_status']=='active',
+                'SHOP_UNAVAILABLE','This shop is not active')
+    target=os.getenv('TALLY_SHOP_AGENT_URL','').strip()
+    require(target.startswith('https://'),'SHOP_CHANNEL_UNAVAILABLE',
+            'This shop does not have a customer channel configured')
+    return {'business':row['name'],'shop_slug':row['shop_slug'],'agent_url':target}
 
 def require_role(actor,role):
     require(actor['role']==role,'FORBIDDEN',f'Only a {role} may perform this action')
