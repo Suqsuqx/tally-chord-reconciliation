@@ -328,6 +328,10 @@ def test_paystack_connection_needs_only_restricted_key_and_claim_is_api_verified
     checkout = {}
     def initialize(_business_id, _order_id, _amount_minor, email):
         checkout["email"] = email
+        paystack.register_payment_reference(
+            connected["connection_id"], _business_id, _order_id, "asyan-reference",
+            checkout_url="https://checkout.paystack.test/demo",
+        )
         return {"method": "paystack", "status": "initialized",
                 "authorization_url": "https://checkout.paystack.test/demo",
                 "reference": "asyan-reference"}
@@ -337,7 +341,15 @@ def test_paystack_connection_needs_only_restricted_key_and_claim_is_api_verified
                            "quantity": 1}],
                          "asyan-paystack-001")
     assert order["payment"]["status"] == "initialized"
+    assert order["payment"]["customer_action"] == {
+        "type": "open_checkout",
+        "label": "Pay securely with Paystack",
+        "url": "https://checkout.paystack.test/demo",
+    }
     assert checkout["email"] == "customer@example.test"
+    awaiting = get_my_order(customer["session_token"], order["order_id"])
+    assert awaiting["status"] == "awaiting_payment"
+    assert awaiting["payment"]["customer_action"]["url"] == "https://checkout.paystack.test/demo"
     monkeypatch.setattr(paystack, "verify_test_transaction_for_order",
                         lambda *_args, **_kwargs: {"status": "success", "reference": "asyan-reference",
                                                   "transaction_id": 991122,

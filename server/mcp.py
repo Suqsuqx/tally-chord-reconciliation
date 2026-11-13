@@ -31,9 +31,9 @@ SHOP={
      'sender_identity':SENDER,'display_name':P('Customer name, supplied by the customer'),
      'customer_email':P('Optional customer email to remember for Paystack checkout')}),
  'get_catalog':S('Current bound-tenant prices and availability from SQL, not knowledge files. Requires the server-bound active Shop or a customer session from it; there is no model-selected merchant.',{'session_token':TOKEN}),
- 'create_order':S('Create order for linked customer; server rechecks stock and calculates total. Reuse request_id on retries.',
+ 'create_order':S('Create order for linked customer; server rechecks stock and calculates total. Reuse request_id on retries. If payment.customer_action.url is returned, include that exact checkout URL in the customer reply immediately.',
        {'session_token':TOKEN,'items':{'type':'array','items':{'type':'object','properties':{'product_id':P('Catalog item ID'),'quantity':P('Positive quantity','integer')},'required':['product_id','quantity']}},'request_id':P('Unique idempotency key stable for retry'),'payment_email':P('Customer email needed only when Paystack is configured and no email is already remembered')},['session_token','items','request_id']),
- 'get_my_order':S('Get a customer-owned order. If the customer explicitly confirms receipt, promote the paid order to fulfilled, resolve the merchant delivery request and audit skipped offline stages.',{
+ 'get_my_order':S('Get a customer-owned order. Awaiting-payment orders return their configured payment action; include payment.customer_action.url in the customer reply immediately. If the customer explicitly confirms receipt, promote the paid order to fulfilled, resolve the merchant delivery request and audit skipped offline stages.',{
      'session_token':TOKEN,'order_id':P('Order reference'),
      'confirm_received':P('True only when the customer explicitly says the order was received','boolean'),
      'confirmation_note':P('Optional short customer wording confirming receipt')},['session_token','order_id']),

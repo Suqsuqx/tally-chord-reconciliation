@@ -411,6 +411,18 @@ def upsert_product(session_token,name,price_minor,stock_on_hand,low_stock_thresh
         audit(c,a,'product.upserted',pid,{'price_minor':price_minor,'stock_on_hand':stock_on_hand})
         return {'product_id':pid,'name':name.strip(),'price_minor':price_minor,'stock_on_hand':stock_on_hand}
 
+def _decorate_checkout_action(payment):
+    checkout_url=payment.get('authorization_url') if isinstance(payment,dict) else None
+    if payment.get('status')=='initialized' and isinstance(checkout_url,str) and checkout_url:
+        # Make the required customer action prominent and unambiguous for chat
+        # agents. authorization_url remains for backwards compatibility.
+        payment['customer_action']={
+            'type':'open_checkout',
+            'label':'Pay securely with Paystack',
+            'url':checkout_url,
+        }
+    return payment
+
 def _order_payment_instructions(business_id,order_id,total_minor,payment_email=None):
     with tx() as c:
         settings=c.execute('SELECT payment_method,bank_details_json FROM business_settings WHERE business_id=?',
@@ -428,10 +440,41 @@ def _order_payment_instructions(business_id,order_id,total_minor,payment_email=N
                     'notice':'Provide an email address to create the hosted Paystack TEST checkout.'}
         try:
             from .paystack_connections import initialize_test_transaction
-            return initialize_test_transaction(business_id,order_id,total_minor,payment_email)
+            payment=initialize_test_transaction(business_id,order_id,total_minor,payment_email)
+            return _decorate_checkout_action(payment)
         except (ToolFailure,ValueError):
             return {'method':'paystack','status':'temporarily_unavailable',
                     'notice':'The order is saved, but checkout could not be initialized. Retry with the same request_id.'}
+    return {'method':'unconfigured','status':'unavailable'}
+
+def _stored_order_payment_instructions(business_id,order_id,total_minor,payment_email=None):
+    """Return an actionable payment result without making a provider request."""
+    with tx() as c:
+        settings=c.execute('SELECT payment_method,bank_details_json FROM business_settings WHERE business_id=?',
+                           (business_id,)).fetchone()
+        reference=c.execute('''SELECT provider_reference,checkout_url,status
+                               FROM payment_provider_references
+                               WHERE business_id=? AND order_id=? AND provider='paystack'
+                               ORDER BY created_at DESC LIMIT 1''',(business_id,order_id)).fetchone()
+    if not settings or not settings['payment_method']:
+        return {'method':'sandbox','status':'awaiting_external_payment','verified':False}
+    if settings['payment_method']=='manual_bank':
+        bank=json.loads(settings['bank_details_json'] or '{}')
+        return {'method':'manual_bank','status':'awaiting_manual_confirmation','bank':bank,
+                'amount_minor':total_minor,'reference':order_id,
+                'notice':'A payment claim remains unverified until an Admin confirms receipt.'}
+    if settings['payment_method']=='paystack':
+        if reference and reference['checkout_url']:
+            return _decorate_checkout_action({
+                'method':'paystack','status':'initialized',
+                'authorization_url':reference['checkout_url'],
+                'reference':reference['provider_reference'],
+            })
+        if not payment_email:
+            return {'method':'paystack','status':'customer_email_required',
+                    'notice':'Provide an email address to create the hosted Paystack TEST checkout.'}
+        return {'method':'paystack','status':'temporarily_unavailable',
+                'notice':'The order is saved, but checkout is not available. Retry the original order request.'}
     return {'method':'unconfigured','status':'unavailable'}
 
 def create_order(session_token,items,request_id,payment_email=None):
@@ -530,7 +573,16 @@ def get_my_order(session_token,order_id,confirm_received=False,confirmation_note
         result={'order_id':o['id'],'total_minor':o['total_minor'],'currency':o['currency'],'status':o['status'],
                 'items':[rowdict(i) for i in items]}
         result.update(status_result)
-        return result
+        business_id=a['business_id']
+        payment_email=a['email']
+    # An awaiting-payment lookup must remain actionable. This recovers and
+    # returns the existing idempotent checkout URL even when an agent performs
+    # a status lookup immediately after create_order, without another provider
+    # network request.
+    if result['status']=='awaiting_payment':
+        result['payment']=_stored_order_payment_instructions(
+            business_id,result['order_id'],result['total_minor'],payment_email)
+    return result
 
 def record_payment_claim(session_token,order_id,note='Customer reports transfer'):
     with tx() as c:
