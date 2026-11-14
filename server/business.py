@@ -555,6 +555,9 @@ def create_order(session_token,items,request_id,payment_email=None):
     supplied_email=_customer_email(payment_email) if payment_email is not None else None
     with tx() as c:
         a=actor_from_token(c,session_token,'shop')
+        settings=c.execute('SELECT profile_json,policies_json FROM business_settings WHERE business_id=?',
+                           (a['business_id'],)).fetchone()
+        fulfillment_method=_business_fulfillment_method(settings)
         checkout_email=supplied_email or a['email']
         if supplied_email and supplied_email!=a['email']:
             c.execute('UPDATE actors SET email=? WHERE id=?',(supplied_email,a['id']))
@@ -571,7 +574,8 @@ def create_order(session_token,items,request_id,payment_email=None):
             old={r['product_id']:r['qty'] for r in c.execute('SELECT product_id,qty FROM order_items WHERE order_id=?',(prior['id'],)).fetchall()}
             require(old==parsed,'IDEMPOTENCY_CONFLICT','This request ID was previously used for different items')
             result={'order_id':prior['id'],'total_minor':prior['total_minor'],'currency':prior['currency'],
-                    'status':prior['status'],'duplicate':True,'business_id':a['business_id']}
+                    'status':prior['status'],'fulfillment_method':prior['fulfillment_method'],
+                    'duplicate':True,'business_id':a['business_id']}
             business_id=a['business_id'];order_id=prior['id'];order_total=prior['total_minor']
         else:
             total=0;rows=[]
@@ -582,12 +586,18 @@ def create_order(session_token,items,request_id,payment_email=None):
                 require(available>=qty,'OUT_OF_STOCK',f'{p["name"]} is unavailable in the requested quantity (available: {available})')
                 total+=p['price_minor']*qty;rows.append((p,qty))
             oid=new_id('TLY')
-            c.execute('INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?)',(oid,a['business_id'],a['id'],total,'NGN','awaiting_payment',request_id,now(),now()))
+            c.execute('''INSERT INTO orders
+                         (id,business_id,customer_id,total_minor,currency,status,idempotency_key,
+                          created_at,updated_at,fulfillment_method)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                      (oid,a['business_id'],a['id'],total,'NGN','awaiting_payment',request_id,
+                       now(),now(),fulfillment_method))
             for p,qty in rows:
                 c.execute('INSERT INTO order_items VALUES(?,?,?,?,?)',(oid,p['id'],p['name'],qty,p['price_minor']))
                 c.execute('UPDATE products SET stock_reserved=stock_reserved+?,updated_at=? WHERE id=?',(qty,now(),p['id']))
             audit(c,a,'order.created',oid,{'total_minor':total})
             result={'order_id':oid,'total_minor':total,'currency':'NGN','status':'awaiting_payment',
+                    'fulfillment_method':fulfillment_method,
                     'duplicate':False,'business_id':a['business_id']}
             business_id=a['business_id'];order_id=oid;order_total=total
     # Finish provider checkout after the order transaction commits. Retrying with
@@ -595,31 +605,69 @@ def create_order(session_token,items,request_id,payment_email=None):
     result['payment']=_order_payment_instructions(business_id,order_id,order_total,checkout_email)
     return result
 
-FULFILMENT_STAGES=('confirmed','preparing','dispatched','delivery_reported','fulfilled')
+DELIVERY_STAGES=('confirmed','preparing','dispatched','delivery_reported','fulfilled')
+PICKUP_STAGES=('confirmed','preparing','ready_for_pickup','fulfilled')
+FULFILMENT_STATUSES={'preparing','ready_for_pickup','dispatched','delivery_reported','fulfilled'}
+
+def _business_fulfillment_method(settings):
+    """Use only explicit merchant-approved profile or policy data for pickup routing."""
+    if settings is None:
+        return 'delivery'
+    try:
+        profile=json.loads(settings['profile_json'] or '{}')
+        policies=json.loads(settings['policies_json'] or '[]')
+    except (TypeError,ValueError,KeyError):
+        return 'delivery'
+    if isinstance(profile,dict):
+        for key in ('fulfillment_method','fulfilment_method','delivery_method','fulfillment'):
+            value=profile.get(key)
+            if isinstance(value,str) and value.strip().lower().replace('-','_').replace(' ','_') in (
+                    'pickup','pickup_only','collection','collection_only'):
+                return 'pickup'
+        if profile.get('pickup_available') is True and profile.get('delivery_available') is False:
+            return 'pickup'
+    policy_text=' '.join(
+        f"{item.get('question','')} {item.get('answer','')}"
+        for item in policies if isinstance(item,dict)
+    ).lower() if isinstance(policies,list) else ''
+    if (re.search(r'\b(?:pick[\s-]?up|collection)\s+only\b',policy_text) or
+            re.search(r'\bno\s+(?:home\s+)?delivery\b',policy_text)):
+        return 'pickup'
+    return 'delivery'
+
+def _fulfilment_path(order):
+    return PICKUP_STAGES if order['fulfillment_method']=='pickup' else DELIVERY_STAGES
 
 def _record_forward_order_status(c,actor,order,new_status,source,note=None):
-    require(order['status'] in FULFILMENT_STAGES,'INVALID_TRANSITION',
+    path=_fulfilment_path(order)
+    require(order['status'] in path,'INVALID_TRANSITION',
             'Payment must be confirmed before fulfilment can be recorded')
-    current_index=FULFILMENT_STAGES.index(order['status'])
-    target_index=FULFILMENT_STAGES.index(new_status)
+    require(new_status in path,'INVALID_TRANSITION',
+            'Choose a fulfilment stage that matches this order\'s pickup or delivery method')
+    current_index=path.index(order['status'])
+    target_index=path.index(new_status)
     require(target_index>current_index,'INVALID_TRANSITION',
             f'Cannot move {order["status"]} to {new_status}')
-    skipped=list(FULFILMENT_STAGES[current_index+1:target_index])
+    skipped=list(path[current_index+1:target_index])
     c.execute('UPDATE orders SET status=?,updated_at=? WHERE id=?',(new_status,now(),order['id']))
-    if new_status=='delivery_reported':
+    if new_status in ('delivery_reported','ready_for_pickup'):
+        kind='confirm_delivery' if new_status=='delivery_reported' else 'confirm_pickup'
+        message=('The merchant reported this order delivered. Please confirm whether you received it.'
+                 if kind=='confirm_delivery' else
+                 'Your order is ready for pickup. Please confirm once you have collected it.')
         c.execute('''INSERT OR IGNORE INTO customer_notifications
                      (id,business_id,customer_id,order_id,kind,message,status,created_at,resolved_at)
                      VALUES(?,?,?,?,?,?,'pending',?,NULL)''',
                   (new_id('notice'),order['business_id'],order['customer_id'],order['id'],
-                   'confirm_delivery',
-                   'The merchant reported this order delivered. Please confirm whether you received it.',now()))
+                   kind,message,now()))
     if new_status=='fulfilled':
         for item in c.execute('SELECT * FROM order_items WHERE order_id=?',(order['id'],)).fetchall():
             c.execute('''UPDATE products
                          SET stock_on_hand=stock_on_hand-?,stock_reserved=stock_reserved-?,updated_at=?
                          WHERE id=?''',(item['qty'],item['qty'],now(),item['product_id']))
         c.execute('''UPDATE customer_notifications SET status='confirmed',resolved_at=?
-                     WHERE order_id=? AND customer_id=? AND kind='confirm_delivery' AND status='pending' ''',
+                     WHERE order_id=? AND customer_id=?
+                     AND kind IN ('confirm_delivery','confirm_pickup') AND status='pending' ''',
                   (now(),order['id'],order['customer_id']))
     audit(c,actor,'order.status_changed',order['id'],{
         'from':order['status'],'to':new_status,'source':source,
@@ -642,8 +690,12 @@ def get_my_order(session_token,order_id,confirm_received=False,confirmation_note
                     c,a,o,'fulfilled','customer',confirmation_note or 'Customer confirmed receipt')
                 o=c.execute('SELECT * FROM orders WHERE id=?',(order_id,)).fetchone()
         items=c.execute('SELECT name,qty,price_minor FROM order_items WHERE order_id=?',(order_id,)).fetchall()
+        business=c.execute('SELECT b.name,bs.profile_json FROM businesses b JOIN business_settings bs '
+                           'ON bs.business_id=b.id WHERE b.id=?',(a['business_id'],)).fetchone()
+        profile=json.loads(business['profile_json'] or '{}') if business else {}
+        pickup_address=(profile.get('pickup_address') or profile.get('address')) if isinstance(profile,dict) else None
         result={'order_id':o['id'],'total_minor':o['total_minor'],'currency':o['currency'],'status':o['status'],
-                'items':[rowdict(i) for i in items]}
+                'fulfillment_method':o['fulfillment_method'],'items':[rowdict(i) for i in items]}
         result.update(status_result)
         business_id=a['business_id']
         payment_email=a['email']
@@ -657,12 +709,39 @@ def get_my_order(session_token,order_id,confirm_received=False,confirmation_note
             result.update({'status':'confirmed','payment':{
                 'method':'paystack','status':'verified','verified':True,
                 'verification_source':'paystack_api'}})
+            result['customer_reply']=_customer_order_status_reply(
+                result,business['name'] if business else 'the shop',pickup_address)
             return result
         # If Paystack has not verified the charge, keep the existing checkout
         # actionable without initializing a second transaction.
         result['payment']=_stored_order_payment_instructions(
             business_id,result['order_id'],result['total_minor'],payment_email)
+    if result['status']!='awaiting_payment':
+        result['customer_reply']=_customer_order_status_reply(
+            result,business['name'] if business else 'the shop',pickup_address)
     return result
+
+def _customer_order_status_reply(order,business_name,pickup_address=None):
+    """Short, actionable customer wording for a simple status question."""
+    status=order.get('status')
+    if status=='confirmed':
+        if order.get('fulfillment_method')=='pickup':
+            return "Your payment is confirmed. I don't have a pickup-ready update yet—would you like me to ask the shop?"
+        return "Your payment is confirmed. I don't have a preparation update yet—would you like me to ask the shop?"
+    if status=='preparing':
+        if order.get('fulfillment_method')=='pickup':
+            return "Your order is being prepared. Check back here for a pickup update."
+        return "Your order is being prepared. Check back here for the next update."
+    if status=='ready_for_pickup':
+        location=f" at {pickup_address}" if isinstance(pickup_address,str) and pickup_address.strip() else ''
+        return f"Your order is ready for pickup{location}."
+    if status=='dispatched':
+        return "Your order has been dispatched."
+    if status=='delivery_reported':
+        return "The shop has marked your order as delivered. Have you received it?"
+    if status=='fulfilled':
+        return f"Your order is complete. Thank you for shopping with {business_name}."
+    return "I couldn't retrieve an update for that order. Please try again."
 
 def _verify_and_reconcile_paystack_order(business_id,order_id):
     try:
@@ -733,7 +812,7 @@ def get_order_queue(session_token):
     with tx() as c:
         a=actor_from_token(c,session_token,'desk')
         orders=c.execute('''SELECT o.id,o.customer_id,c.display_name AS customer_name,
-                                   o.total_minor,o.status,o.created_at
+                                   o.total_minor,o.status,o.fulfillment_method,o.created_at
                             FROM orders o JOIN actors c ON c.id=o.customer_id
                             WHERE o.business_id=? ORDER BY o.created_at DESC LIMIT 40''',
                          (a['business_id'],)).fetchall()
@@ -760,19 +839,23 @@ def update_order_status(session_token,order_id,new_status,confirmation_note=None
             audit(c,a,'payment.manually_confirmed',order_id,{'note':confirmation_note.strip()[:500]})
             return {'order_id':order_id,'previous_status':'awaiting_payment','status':'confirmed',
                     'payment_assurance':'merchant_confirmed_manual','provider_verified':False}
-        require(new_status in FULFILMENT_STAGES[1:],'INVALID_TRANSITION','Choose a valid forward fulfilment status')
+        require(new_status in FULFILMENT_STATUSES,'INVALID_TRANSITION','Choose a valid forward fulfilment status')
         if new_status=='fulfilled':
             require(isinstance(confirmation_note,str) and len(confirmation_note.strip())>=4,
                     'CUSTOMER_CONFIRMATION_REQUIRED',
                     'Record the customer confirmation before marking this order fulfilled')
         result=_record_forward_order_status(
             c,a,o,new_status,'merchant',confirmation_note or 'Merchant recorded offline progress')
-        if new_status=='delivery_reported':
+        if new_status in ('delivery_reported','ready_for_pickup'):
             result['customer_confirmation']={
                 'status':'pending',
-                'outbound_delivery':'not_verified',
-                'message':'Please confirm whether your order has been delivered.',
+                'outbound_message':'not_verified',
+                'message':('Please confirm whether your order has been delivered.'
+                           if new_status=='delivery_reported' else
+                           'Please confirm whether you have collected your order.'),
             }
+            if new_status=='delivery_reported':
+                result['customer_confirmation']['outbound_delivery']='not_verified'
         return result
 
 def get_reconciliation_report(session_token):

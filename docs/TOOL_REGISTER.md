@@ -9,7 +9,7 @@ Each tool is exposed through **one** of two authenticated public HTTPS endpoints
 | `link_identity` | Server-bound Shop context | Route a sender to the one active bound business, remember customer-provided name/email and return pending delivery confirmations. Merchant selection is not exposed. |
 | `get_catalog` | Bound active Shop/session | Tenant-scoped approved profile/policies, products, prices and availability. The server injects the binding; there is no Tally-wide catalogue or store selector. |
 | `create_order` | Customer session | Recheck stock, reserve units and automatically use the merchant's configured manual-bank or Paystack method. Reuse a remembered Paystack email when available. |
-| `get_my_order` | Customer session | Read only the customer's order; explicit receipt confirmation promotes a paid order to fulfilled and resolves the merchant delivery report. |
+| `get_my_order` | Customer session | Read only the customer's order and provide one concise status reply; explicit receipt/pickup confirmation promotes a paid order to fulfilled and resolves the matching confirmation request. |
 | `record_payment_claim` | Customer session | Record the claim, then independently verify a mapped Paystack transaction; otherwise remain unverified. |
 | `create_support_case` | Customer session | Persist inquiry/complaint with owner and optional own order; a delivery mismatch remains unfulfilled and is flagged to Desk. |
 | `get_my_support_case` | Customer session | Read own case and recorded replies. |
@@ -22,7 +22,7 @@ Each tool is exposed through **one** of two authenticated public HTTPS endpoints
 | `get_catalog` | Both | Merchant catalogue/onboarding state, authorized Notion resources and optional bounded preview. |
 | `upsert_product` | Admin | Add or change price, physical stock and threshold. |
 | `get_order_queue` | Both | All current orders for sandbox business. |
-| `update_order_status` | Both/Admin confirmation | Record forward paid progress and merchant delivery reports, including offline stage jumps; Admin-only audited manual-bank confirmation from awaiting payment. |
+| `update_order_status` | Both/Admin confirmation | Record forward paid progress, including pickup readiness (`ready_for_pickup`) or delivery reports and offline stage jumps; Admin-only audited manual-bank confirmation from awaiting payment. |
 | `get_reconciliation_report` | Both | Verified matched payments, exceptions, unpaid orders and claims. |
 | `get_merchant_catchup` | Both | Time-scoped activity + report + stock and support backlog. |
 | `get_inventory_alerts` | Both | Low/out of stock alerts, accounting for reserved stock. |

@@ -7,9 +7,9 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 from server.app import app,mcp_context_shape
-from server.db import tx
+from server.db import tx, init_db
 from server.business import (issue_link_code,link_identity,get_catalog,upsert_product,
-    create_order,record_payment_claim,get_my_order,get_reconciliation_report,get_inventory_alerts,
+    create_order,record_payment_claim,get_my_order,get_order_queue,get_reconciliation_report,get_inventory_alerts,
     get_merchant_catchup,update_order_status,create_support_case,list_support_cases,
     reply_support_case,get_my_support_case,ToolFailure,record_stock_adjustment)
 from tests.demo_seed import DEMO_BUSINESS_ID,seed_demo
@@ -167,6 +167,60 @@ def test_customer_receipt_confirmation_fulfils_only_their_paid_order_once():
     product=next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products']
                  if p['id']=='cup-choc')
     assert product['available_qty']==12
+
+def test_pickup_order_uses_short_customer_updates_and_pickup_ready_confirmation():
+    with tx() as conn:
+        conn.execute('UPDATE business_settings SET profile_json=?,policies_json=? WHERE business_id=?',(
+            json.dumps({'address':'1 Herethere, Lagos'}),
+            json.dumps([{'question':'How are orders fulfilled?','answer':'Pickup only.'}]),
+            DEMO_BUSINESS_ID))
+    customer=sess('cust-ada','shop');operator=sess('staff-tola','desk')
+    order=create_order(customer,[{'product_id':'brownie','quantity':1}],'pickup-status')
+    assert order['fulfillment_method']=='pickup'
+    assert next(x for x in get_order_queue(operator)['orders']
+                if x['id']==order['order_id'])['fulfillment_method']=='pickup'
+    assert pay_http(order['order_id'],650000).json()['match_status']=='matched'
+    confirmed=get_my_order(customer,order['order_id'])
+    assert confirmed['status']=='confirmed'
+    assert confirmed['customer_reply']==(
+        "Your payment is confirmed. I don't have a pickup-ready update yet—would you like me to ask the shop?")
+    assert 'Brownie' not in confirmed['customer_reply']
+    assert '6500' not in confirmed['customer_reply']
+    with pytest.raises(ToolFailure) as error:
+        update_order_status(operator,order['order_id'],'dispatched')
+    assert error.value.code=='INVALID_TRANSITION'
+    ready=update_order_status(operator,order['order_id'],'ready_for_pickup')
+    assert ready['status']=='ready_for_pickup'
+    assert ready['customer_confirmation']['status']=='pending'
+    assert ready['customer_confirmation']['outbound_message']=='not_verified'
+    ready_status=get_my_order(customer,order['order_id'])
+    assert ready_status['customer_reply']=='Your order is ready for pickup at 1 Herethere, Lagos.'
+    linked=link_identity(issue_link_code('cust-ada'),'shop')
+    assert any(x['kind']=='confirm_pickup' for x in linked['pending_actions'])
+    fulfilled=get_my_order(customer,order['order_id'],confirm_received=True,
+                           confirmation_note='Picked up, thank you')
+    assert fulfilled['status']=='fulfilled'
+    assert fulfilled['customer_reply'].endswith('Test Merchant Fixture.')
+    product=next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products']
+                 if p['id']=='brownie')
+    assert product['available_qty']==4
+
+def test_existing_orders_table_gets_additive_fulfillment_method_migration(tmp_path,monkeypatch):
+    legacy_path=tmp_path/'legacy.db'
+    import sqlite3
+    with sqlite3.connect(legacy_path) as conn:
+        conn.execute('''CREATE TABLE orders (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL, customer_id TEXT NOT NULL,
+            total_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+        conn.execute("INSERT INTO orders VALUES('old-order','b','c',100,'NGN','confirmed','k','t','t')")
+    monkeypatch.setenv('TALLY_DB_PATH',str(legacy_path))
+    init_db()
+    with sqlite3.connect(legacy_path) as conn:
+        columns={row[1] for row in conn.execute('PRAGMA table_info(orders)')}
+        method=conn.execute('SELECT fulfillment_method FROM orders WHERE id=?',('old-order',)).fetchone()[0]
+    assert 'fulfillment_method' in columns
+    assert method=='delivery'
 
 
 def test_customer_disputes_merchant_delivery_report_into_support_queue():

@@ -44,7 +44,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS products_name_by_business ON products(business
 CREATE TABLE IF NOT EXISTS orders (
  id TEXT PRIMARY KEY, business_id TEXT NOT NULL, customer_id TEXT NOT NULL,
  total_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL,
- idempotency_key TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+ idempotency_key TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ fulfillment_method TEXT NOT NULL DEFAULT 'delivery'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS order_idempotency ON orders(business_id,customer_id,idempotency_key);
 CREATE TABLE IF NOT EXISTS order_items (
@@ -153,6 +154,9 @@ def init_db():
         actor_columns = {row[1] for row in conn.execute('PRAGMA table_info(actors)')}
         if 'email' not in actor_columns:
             conn.execute('ALTER TABLE actors ADD COLUMN email TEXT')
+        order_columns = {row[1] for row in conn.execute('PRAGMA table_info(orders)')}
+        if 'fulfillment_method' not in order_columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN fulfillment_method TEXT NOT NULL DEFAULT 'delivery'")
 
 @contextmanager
 def tx():
