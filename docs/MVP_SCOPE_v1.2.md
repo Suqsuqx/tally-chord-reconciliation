@@ -1,14 +1,28 @@
 # Tally — Reconciliation-First MVP Scope
 
 **Project:** TSG Labs Chord Build Exercise  
-**Version:** 1.2 · 5 November 2026  
-**Status:** Sandbox backend, VPS HTTPS service, Chord MCP health/discovery, real Chord-origin Shop/Desk tool calls, signed-payment journey and security failures verified on 6 November 2026. Authenticated Channel simulator UI evidence and native handoff remain pending.
+**Version:** 1.2 · submission refresh 14 November 2026  
+**Status:** Sandbox backend deployed; 62 tests reported passing on source and VPS; genuine Notion OAuth write/readback observed on 13 November; clean recording reset verified 14 November. Founder reports simulator video recorded; external playback, final Paystack event and native handoff are not independently reviewed here.
 
 ## 1. Purpose and success definition
 
 Tally is a WhatsApp-first business operations assistant that keeps merchant orders, payment reports, fulfilment and stock records in sync and explains what needs attention. The main product interaction is the merchant asking, *“What's happened, what doesn't add up, and what should I do next?”* Tally responds with a reconciled business catch-up grounded in stored records—not an invented narrative.
 
 **MVP proof:** in TSG Labs' Chord WhatsApp simulator, a customer places an order; their payment report stays unverified; an authenticated sandbox payment event is matched against the order; the merchant retrieves the reconciliation result, catches up on orders and support, and sees a low-stock alert. Failures must be handled safely and demonstrably.
+
+## Product rationale — assessment submission
+
+**Why Tally exists.** Small merchants already keep information in everyday business documents and payment providers but lack a single reliable account of what customers ordered, whether they actually paid, what stock remains and what the merchant must do next. A generic chat agent can answer FAQs; Tally's stronger value is its **deterministic operational ledger and reconciliation**, exposed through natural Shop and Desk conversations.
+
+**Why two teammates, one merchant demonstration.** Customers need a narrow, safe Shop surface; owners/operators need a privileged Desk surface. This split enforces separate tool lists and backend role checks. The demonstration intentionally uses one ASYAN SHOP Shop binding, although Desk registration and the data model are generic. The Shop endpoint is **not** an open marketplace or a universal merchant switcher.
+
+**Why connect existing records instead of scripting a bot.** Onboarding starts by creating an empty business, then brings in the merchant's own Notion information or CSVs through an authorized, preview-and-approve workflow. It demonstrates useful setup from the business's existing data, while keeping merchant-authored content distinct from operational ledger entries. Tally-owned Notion sections are readable mirrors; merchant source pages remain independently owned.
+
+**Why Paystack is separate.** A customer's claim or uploaded evidence must not make an order paid. The merchant's own restricted TEST credential is provided via a scoped HTTPS setup form and encrypted per business; Paystack verification or a separately signed sandbox event is the payment authority. Manual-bank confirmation is an explicitly audited alternate flow and is never presented as an automatic Paystack transaction.
+
+**Why this is not production.** Simulator sender fields do not prove WhatsApp-number ownership, native takeover and message delivery need channel proof, and the server is sandbox-only. Merchant connections and live-provider checks are reported with precise evidence boundaries. The short recording is a user-reported completed artifact pending independent playback review.
+
+**Assessment success:** An outsider can follow a genuine empty signup, authorized business-data import, customer order and truthful payment state, then retrieve the same order, fulfilment, inventory and support facts in Desk and a readable Notion mirror. Any omitted provider or channel proof must be labelled, not filled with a simulated claim.
 
 ## 2. Experience, actors and permissions
 

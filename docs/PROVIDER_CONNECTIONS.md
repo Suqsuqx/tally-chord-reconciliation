@@ -2,9 +2,11 @@
 
 This branch implements merchant-owned Paystack TEST and Notion OAuth connection flows. The public repository contains no merchant credentials, and enabled setup routes do not prove that either provider has been connected or accepted live.
 
-## Deployment record
+## Latest documented provider record (14 November 2026)
 
-The default-off provider core was deployed on 11 November. On 12 November, the merchant-onboarding release `cd649bf` was deployed after a private source/environment snapshot and consistent SQLite backup. Source and deployed copies passed 37 tests; the additive migration preserved every core-table row count; SQLite integrity remained `ok`; local/public health returned sandbox `status: ok`; and authenticated discovery remained exactly 7 Shop / 11 Desk tools. Tally's private Notion client configuration and both provider feature flags are now present/enabled. Provider connection count remains zero: no merchant Paystack key, webhook secret or Notion OAuth token has been submitted, and no genuine provider acceptance call is claimed.
+The 11–12 November default-off/provider-unconnected description below is historical. In the 13 November authenticated ASYAN session, Tally's **own Notion OAuth** connected and Tally successfully created five merchant workspace sections and backfilled three products and an order. Genuine Notion API reads returned HTTP 200 for nine generated pages (see field notes); subsequent status checks showed `connected` and an active workspace. A merchant Paystack connection also reached a connected status in the same setup session. This does **not independently verify** that a final Paystack hosted-checkout transfer, API verify and post-recording reconciliation occurred; review the video and sanitized provider traces before claiming that.
+
+On 14 November the recording reset intentionally removed ASYAN's local provider links and Tally-managed Notion pages but preserved the external merchant-authored ASYAN source pages. The last recorded source and deployed test result is **62 passing tests**, health and scope checks OK, Chord discovery 7 Shop / 11 Desk. Founder reports that the final video was subsequently recorded; its footage and post-recording provider state have not been reviewed here.
 
 ## Security model
 
@@ -60,8 +62,8 @@ The first acceptance stops before catalogue import or payment settlement:
 
 PASS requires sanitized HTTP/tool traces, ciphertext-only database inspection, single-use/replay failures and actual provider responses. A locally mocked test, a setup page, a connection record or a user claim is not live-provider proof.
 
-## Explicitly still requiring live acceptance
+## Remaining proof and boundaries
 
-- Live-provider acceptance of Paystack transaction initialization, hosted test checkout and claim-triggered API verification. The implementation and mocked security tests are present, but genuine Paystack responses remain unverified.
-- Genuine Notion workspace creation, approved write and readback in ASYAN SHOP's OAuth workspace. Mocked tests cover the local implementation only.
-- Trusted WhatsApp sender authentication, multi-business customer routing and the final simulator recording.
+- **Already observed before reset:** real ASYAN Notion OAuth, managed workspace creation/write/readback and connected provider-status checks (13 November); separately documented in `docs/DEPLOYMENT_FIELD_NOTES.md`.
+- **Needs review of final recorded session:** exact Paystack TEST hosted transaction/verify and reconciliation result; authorized merchant source import and fresh Notion Orders write/readback after reset. A user-reported recorded video is not itself inspection of its contents.
+- **Not an MVP claim:** signed production WhatsApp sender identity, production multi-business Shop switching, native human takeover and confirmed outbound delivery; separately verify if showcased.

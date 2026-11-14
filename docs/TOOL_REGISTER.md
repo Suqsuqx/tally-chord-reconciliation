@@ -44,4 +44,4 @@ The sandbox accepts an explicit simulator sender identifier only to demonstrate 
 
 ## MCP transport note
 
-This project implements stateless JSON-RPC `initialize`, `ping`, `tools/list` and `tools/call` over Streamable HTTP. On 6 November 2026, Chord health and discovery returned exactly seven Shop and eleven Desk tools, and persisted Chord external-chat turns successfully invoked both servers. The provider branch keeps those counts unchanged, but has not yet been deployed or re-probed through Chord. Authenticated TSG Channel simulator UI capture remains a separate acceptance gate.
+This project implements stateless JSON-RPC `initialize`, `ping`, `tools/list` and `tools/call` over Streamable HTTP. The 14 November 2026 field notes report the source deployed on the VPS, and a redacted authenticated Chord audit confirmed exactly seven Shop and eleven Desk tools with the existing teammates and disabled Assistant sentinel. The founder reports a final Channel simulator recording has been captured; playback and individual conversation traces have not been inspected by this documentation update. See the dated evidence and boundaries in `docs/DEPLOYMENT_FIELD_NOTES.md`.

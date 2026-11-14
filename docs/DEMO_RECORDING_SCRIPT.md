@@ -1,6 +1,8 @@
-# Tally three-minute demo — low-credit recording plan
+# Tally three-minute demo — original synthetic-event recording plan
 
-Target: one clean authenticated Channel simulator pass, three teammate turns maximum, no retries unless a turn fails. Prepare codes and the signed-event command off-camera. Never display codes, tokens, signatures, `.env`, raw logs or private database contents.
+**Historical v1.2 plan only.** The final ASYAN SHOP merchant-onboarding simulator sequence is in `docs/ASYAN_SHOP_SIMULATOR_TEST_SCRIPT_2026-11-12.md`; the founder reports the final video has been recorded (14 November 2026). Do not treat this old synthetic-event script as the record of what the submitted video shows. Actual footage, duration, credentials redaction and evaluator permissions still require verification.
+
+Original target: one clean authenticated Channel simulator pass, three teammate turns maximum, no retries unless a turn fails. Prepare codes and the signed-event command off-camera. Never display codes, tokens, signatures, `.env`, raw logs or private database contents.
 
 ## Preflight off-camera
 
