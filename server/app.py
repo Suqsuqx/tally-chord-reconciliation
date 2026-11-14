@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from .business import ingest_verified_payment, resolve_shop_entry, ToolFailure
 from .mcp import process
 from .paystack_connections import complete_paystack_setup
+from .landing import LANDING_PAGE_HTML
 from .notion_connections import (cancel_notion_oauth, complete_notion_oauth,
     initialize_notion_workspace_for_business, select_notion_workspace_parent,
     start_notion_oauth)
@@ -51,6 +52,16 @@ async def lifespan(app):
     yield
 
 app=FastAPI(title='Tally Reconciliation Sandbox',docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
+
+@app.get('/',response_class=HTMLResponse)
+def landing_page():
+    return HTMLResponse(LANDING_PAGE_HTML,headers={
+        'Cache-Control':'public, max-age=300',
+        'Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        'Referrer-Policy':'strict-origin-when-cross-origin',
+        'X-Content-Type-Options':'nosniff',
+        'X-Frame-Options':'DENY',
+    })
 
 @app.get('/healthz')
 def health():

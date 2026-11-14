@@ -315,3 +315,16 @@ def test_reused_provider_event_id_with_changed_details_is_rejected():
     assert pay_http(order['order_id'],250000,event_id='unique-x').json()['match_status']=='matched'
     conflict=pay_http(order['order_id'],500000,event_id='unique-x')
     assert conflict.status_code==400 and conflict.json()['error']=='EVENT_ID_CONFLICT'
+
+
+def test_public_landing_page_sends_merchants_to_tally_desk():
+    with TestClient(app) as client:
+        response=client.get('/')
+
+    assert response.status_code==200
+    assert response.headers['content-type'].startswith('text/html')
+    assert 'Tally — Your business, in good order' in response.text
+    assert response.text.count('https://chat.tsglabs.dev/c/eEyqFbLfrlZbJsEMBPVfNsOD')==4
+    assert 'Your Shop stays private until you activate it.' in response.text
+    assert "default-src 'none'" in response.headers['content-security-policy']
+    assert response.headers['x-frame-options']=='DENY'
