@@ -17,7 +17,7 @@ This repository is an assessment sandbox, not a production payment or identity s
 - Customer name and Paystack email memory scoped to the authenticated sender and merchant, stock reservation, idempotent order creation, signed sandbox payment events (not customer-visible MCP), reconciliation, low-stock alerts and case-specific support.
 - Payment confirmation remains a hard fulfilment gate. After confirmation, merchants may record offline progress up to delivery reported; customer confirmation promotes the order to fulfilled, while a mismatch opens a support case. Skipped stages are audited and stock is deducted exactly once.
 - Automated tests (`pytest`) for identity isolation, payment mismatch/idempotency, out-of-stock and fulfilment failure scenarios.
-- Default-off merchant connections: short-lived Paystack/Notion setup links, AES-GCM encrypted per-business credentials, Notion page-picker and bounded approval previews. With separate Admin approval, Tally creates a merchant-readable Notion workspace for Profile, Catalogue, Policies, Orders and Activity, then mirrors approved SQL records there; SQL remains authoritative. Paystack onboarding needs only a `transactions:write` restricted TEST key; webhook signing is optional. Paystack requires an email before checkout initialization, so Tally asks once and reuses it for that authenticated customer. The hosted page presents the merchant's enabled payment channels. Manual-bank orders require audited Admin confirmation and remain separately labelled.
+- Merchant connections use short-lived Paystack/Notion setup links and AES-GCM encrypted per-business credentials. Notion authorization creates or resumes five Tally-managed sections under the selected business page—Profile, Catalogue, Policies, Orders and Activity—and mirrors approved SQL records there. Merchant-authored source content remains previewed and imported only after Admin approval; SQL remains authoritative. A recording reset backs up SQLite, moves only Tally-owned Notion pages to Notion Trash, then clears the ledger. Paystack onboarding needs only a `transactions:write` restricted TEST key; webhook signing is optional. Paystack requires an email before checkout initialization, so Tally asks once and reuses it for that authenticated customer. The hosted page presents the merchant's enabled payment channels. Manual-bank orders require audited Admin confirmation and remain separately labelled.
 
 ## Verification status — 6 November 2026
 
@@ -51,6 +51,15 @@ set -a; . ./.env; set +a
 .venv/bin/python -m pytest tests -q
 .venv/bin/uvicorn server.app:app --host 127.0.0.1 --port 8787
 ```
+
+## Recording reset
+
+To reset the sandbox after a recording pass, stop `tally.service`, load the private
+environment, and run `scripts/reset_recording.py --execute --confirm "RESET TALLY RECORDING"`.
+The script first creates a mode-`0600` SQLite backup, moves only pages recorded as
+Tally-owned into Notion Trash, and replaces the SQLite ledger with the current empty
+schema. The merchant-selected Notion parent and merchant-authored source pages remain.
+If Notion cleanup fails, the database is left intact so the reset can be retried.
 
 In another shell, run `scripts_utility.py issue-code cust-ada` and `scripts_utility.py issue-code staff-eni` to generate unique link codes, or use the tool demo through Chord after deployment.
 

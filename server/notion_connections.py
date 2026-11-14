@@ -323,12 +323,33 @@ async def complete_notion_oauth(code, state, exchanger=None, discoverer=None):
                          VALUES(?,?,'notion','oauth',?,?,?,?,'active',?,?,?,NULL)""",
                          (connection_id, oauth_state["business_id"], ciphertext, version, permissions,
                           account_ref, timestamp, timestamp, timestamp))
+        # Retain Tally-owned pages so a retried OAuth callback can resume a
+        # partially completed workspace setup instead of creating duplicates.
+        existing_resources = conn.execute(
+            "SELECT * FROM provider_resources WHERE connection_id=?", (connection_id,)
+        ).fetchall()
+        managed_resources = []
+        for existing_resource in existing_resources:
+            try:
+                metadata = json.loads(existing_resource["metadata_json"] or "{}")
+            except ValueError:
+                metadata = {}
+            if metadata.get("managed_by") == "tally":
+                managed_resources.append(existing_resource)
+        managed_ids = {row["resource_id"] for row in managed_resources}
         conn.execute("DELETE FROM provider_resources WHERE connection_id=?", (connection_id,))
+        for managed_resource in managed_resources:
+            conn.execute("""INSERT INTO provider_resources
+                         (connection_id,business_id,provider,resource_id,resource_type,title,
+                          metadata_json,discovered_at) VALUES(?,?,?,?,?,?,?,?)""",
+                         tuple(managed_resource[key] for key in (
+                             "connection_id", "business_id", "provider", "resource_id",
+                             "resource_type", "title", "metadata_json", "discovered_at")))
         for resource in discovery["resources"][:MAX_DISCOVERY_ITEMS]:
             if not isinstance(resource, dict) or resource.get("type") not in ("page", "data_source"):
                 continue
             resource_id = str(resource.get("id", ""))[:80]
-            if not resource_id:
+            if not resource_id or resource_id in managed_ids:
                 continue
             metadata = {key: resource.get(key) for key in
                         ("last_edited_time", "read_status", "parent_type", "parent_id")
@@ -422,7 +443,7 @@ def select_notion_workspace_parent(business_id):
             metadata = json.loads(item["metadata_json"] or "{}")
         except ValueError:
             metadata = {}
-        if metadata.get("parent_id") not in page_ids:
+        if metadata.get("managed_by") != "tally" and metadata.get("parent_id") not in page_ids:
             candidates.append(item)
     if len(candidates) == 1:
         return candidates[0]["resource_id"]
@@ -456,8 +477,18 @@ def initialize_notion_workspace_for_business(business_id, parent_page_id, reques
     if existing is not None:
         require(existing["parent_page_id"] == parent_page_id, "ALREADY_CONFIGURED",
                 "This business already has a different Notion workspace page")
-        return {"status": "active", "created": False, "parent_page_id": parent_page_id,
-                "workspace_url": _notion_url(parent_page_id)}
+        connection = load_notion_connection_for_business(business_id)
+        require(connection is not None, "NOT_CONNECTED", "Connect Notion first")
+        permissions = set(json.loads(connection.get("permissions_json") or "[]"))
+        permissions.update(("authorized_content:read", "insert_content", "update_content"))
+        with tx() as conn:
+            conn.execute("UPDATE provider_connections SET permissions_json=?,updated_at=? WHERE id=?",
+                         (json.dumps(sorted(permissions)), now(), connection["id"]))
+        result = {"status": "active", "created": False, "parent_page_id": parent_page_id,
+                  "workspace_url": _notion_url(parent_page_id)}
+        if backfill:
+            result["backfill"] = sync_notion_business_history(business_id, requester=requester)
+        return result
     connection = load_notion_connection_for_business(business_id)
     require(connection is not None, "NOT_CONNECTED", "Connect Notion first")
     access_token = connection["credentials"]["access_token"]
@@ -470,9 +501,37 @@ def initialize_notion_workspace_for_business(business_id, parent_page_id, reques
         ("orders", "Orders", "Merchant-readable order and payment-status history. SQL remains authoritative."),
         ("activity", "Activity & Reconciliation", "Tally synchronization and reconciliation activity."),
     )
+    with tx() as conn:
+        existing_resources = conn.execute("""SELECT resource_id,title,metadata_json
+                                               FROM provider_resources
+                                               WHERE business_id=? AND connection_id=?
+                                               AND provider='notion' AND resource_type='page'""",
+                                          (business_id, connection["id"])).fetchall()
+    reusable = {}
+    for resource in existing_resources:
+        try:
+            metadata = json.loads(resource["metadata_json"] or "{}")
+        except ValueError:
+            metadata = {}
+        section = metadata.get("managed_section")
+        if (metadata.get("managed_by") == "tally" and
+                metadata.get("parent_id", parent_page_id) == parent_page_id):
+            reusable[section or resource["title"]] = resource["resource_id"]
     for key, label, intro in definitions:
-        sections[key] = _create_child_page(access_token, parent_page_id,
-                                           f"{business_name} — {label}", intro, requester)
+        if key in reusable:
+            sections[key] = reusable[key]
+            continue
+        page_id = _create_child_page(access_token, parent_page_id,
+                                     f"{business_name} — {label}", intro, requester)
+        sections[key] = page_id
+        timestamp = now()
+        with tx() as conn:
+            conn.execute("""INSERT OR REPLACE INTO provider_resources
+                         (connection_id,business_id,provider,resource_id,resource_type,title,
+                          metadata_json,discovered_at) VALUES(?,?, 'notion',?,'page',?,?,?)""",
+                         (connection["id"], business_id, page_id, key,
+                          json.dumps({"managed_by": "tally", "managed_section": key,
+                                      "parent_id": parent_page_id}), timestamp))
     timestamp = now()
     with tx() as conn:
         conn.execute("""INSERT INTO notion_workspaces
@@ -491,12 +550,56 @@ def initialize_notion_workspace_for_business(business_id, parent_page_id, reques
                          (connection_id,business_id,provider,resource_id,resource_type,title,
                           metadata_json,discovered_at) VALUES(?,?,?,?,?,?,?,?)""",
                          (connection["id"], business_id, "notion", page_id, "page",
-                          key, json.dumps({"managed_by": "tally"}), timestamp))
+                          key, json.dumps({"managed_by": "tally", "managed_section": key,
+                                           "parent_id": parent_page_id}), timestamp))
     result = {"status": "active", "created": True, "parent_page_id": parent_page_id,
               "workspace_url": _notion_url(parent_page_id), "sections": sorted(sections)}
     if backfill:
         result["backfill"] = sync_notion_business_history(business_id, requester=requester)
     return result
+
+
+def trash_managed_notion_pages_for_business(business_id, requester=None):
+    """Move only Tally-owned Notion sections and record pages to the workspace trash.
+
+    The merchant-selected parent and all merchant-authored source pages are
+    deliberately excluded. IDs come only from Tally's ownership manifest.
+    """
+    with tx() as conn:
+        workspace = conn.execute("SELECT * FROM notion_workspaces WHERE business_id=?",
+                                 (business_id,)).fetchone()
+        records = conn.execute("SELECT notion_page_id FROM notion_records WHERE business_id=?",
+                               (business_id,)).fetchall()
+        resources = conn.execute("""SELECT resource_id,metadata_json FROM provider_resources
+                                  WHERE business_id=? AND provider='notion'""",
+                                 (business_id,)).fetchall()
+    record_pages = [row["notion_page_id"] for row in records if row["notion_page_id"]]
+    section_pages = []
+    if workspace is not None:
+        section_pages.extend(workspace[key] for key in (
+            "profile_page_id", "catalogue_page_id", "policies_page_id",
+            "orders_page_id", "activity_page_id") if workspace[key])
+    for resource in resources:
+        try:
+            metadata = json.loads(resource["metadata_json"] or "{}")
+        except ValueError:
+            metadata = {}
+        if metadata.get("managed_by") == "tally":
+            section_pages.append(resource["resource_id"])
+    page_ids = list(dict.fromkeys(record_pages + section_pages))
+    if not page_ids:
+        return {"status": "not_configured", "trashed_pages": 0}
+
+    connection = load_notion_connection_for_business(business_id)
+    require(connection is not None, "NOTION_RESET_UNAVAILABLE",
+            "Tally-owned Notion pages cannot be removed without the active connection")
+    access_token = connection["credentials"]["access_token"]
+    for page_id in page_ids:
+        result = _sync_request(access_token, "PATCH", f"/pages/{page_id}",
+                               {"in_trash": True}, requester)
+        require(isinstance(result, dict) and result.get("in_trash") is True,
+                "NOTION_RESET_FAILED", "Notion did not confirm removal of a Tally-owned page")
+    return {"status": "trashed", "trashed_pages": len(page_ids)}
 
 
 def initialize_notion_workspace_sync(session_token, parent_page_id, requester=None):

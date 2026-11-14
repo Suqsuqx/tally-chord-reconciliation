@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from fastapi.testclient import TestClient
 
-from server.app import app, notion_setup_page
+from server.app import app
 from server.business import (ToolFailure, create_support_case, get_catalog, issue_link_code, link_identity,
     upsert_product)
 from server.db import tx
@@ -333,17 +333,6 @@ def test_notion_setup_page_has_no_store_and_strict_browser_policy():
     assert "This setup link is incomplete or expired" in response.text
 
 
-def test_source_only_notion_setup_describes_preview_and_approval(monkeypatch):
-    monkeypatch.setenv("TALLY_NOTION_MANAGED_SYNC_ENABLED", "false")
-    response = asyncio.run(notion_setup_page())
-    assert response.status_code == 200
-    body = response.body.decode()
-    assert "Prepare a clear preview" in body
-    assert "Import nothing until you approve it" in body
-    assert "create or update its managed sections" not in body
-    assert "synchronized automatically" not in body
-
-
 def test_notion_start_reports_stale_link_without_echoing_token():
     stale_token = "stale-notion-setup-token-that-does-not-exist"
     response = TestClient(app).post("/integrations/notion/start", json={
@@ -492,23 +481,3 @@ def test_connected_workspace_returns_status_instead_of_another_setup_link():
     })
     catalog_result = json.loads(catalog["result"]["content"][0]["text"])
     assert catalog_result["onboarding"]["integrations"]["notion"]["workspace_status"] == "active"
-
-
-def test_source_only_connection_is_connected_without_creating_workspace_or_new_link(monkeypatch):
-    monkeypatch.setenv("TALLY_NOTION_MANAGED_SYNC_ENABLED", "false")
-    connect_notion()
-    code = issue_link_code("staff-eni")
-    linked = process("desk", {
-        "jsonrpc": "2.0", "id": 33, "method": "tools/call",
-        "params": {"name": "link_identity", "arguments": {"code": code}},
-    })
-    result = json.loads(linked["result"]["content"][0]["text"])
-    assert result["integrations"]["notion"] == {
-        "connection_status": "connected", "workspace_status": "source_connected",
-    }
-    assert result["provider_setup"]["notion"] == {
-        "status": "connected", "workspace_status": "source_connected",
-    }
-    assert "setup_url" not in result["provider_setup"]["notion"]
-    with tx() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM notion_workspaces").fetchone()[0] == 0

@@ -82,11 +82,8 @@ def _integration_status(c,business_id):
                         (business_id,)).fetchone()
     notion_connected='notion' in connections
     paystack_connected='paystack' in connections
-    managed_sync=os.getenv('TALLY_NOTION_MANAGED_SYNC_ENABLED','true').lower()=='true'
     notion={'connection_status':'connected' if notion_connected else 'not_connected',
-            'workspace_status':('active' if workspace else
-                                ('source_connected' if notion_connected and not managed_sync else
-                                 ('pending' if notion_connected else 'not_configured')))}
+            'workspace_status':'active' if workspace else ('pending' if notion_connected else 'not_configured')}
     if workspace:
         notion['workspace_url']='https://www.notion.so/'+workspace['parent_page_id'].replace('-','')
         notion['managed_sections']=5
