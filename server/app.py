@@ -204,6 +204,17 @@ if(!token){button.disabled=true;status('This setup link is incomplete or expired
 button.addEventListener('click',async()=>{if(!token)return;button.disabled=true;button.textContent='Opening Notion…';status('Preparing your secure Notion authorization…','working');
 try{const response=await fetch('/integrations/notion/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({setup_token:token})});const body=await response.json();if(response.ok&&body.authorize_url){location.assign(body.authorize_url);return;}status(body.message||'Connection failed. Request a new setup link.','error')}catch(_){status('Tally could not be reached. Check your connection and request a new setup link if this continues.','error')}button.disabled=false;button.textContent='Try again'});</script></body></html>"""
 
+NOTION_SOURCE_SETUP_HTML=(NOTION_SETUP_HTML
+    .replace('Choose one business workspace page. Tally will use only that authorized content and keep readable business records there.',
+             'Choose the business page containing the profile, catalogue and policies you want Tally to import.')
+    .replace('<li>Read the selected business page and its shared content</li><li>Create managed Profile, Catalogue, Policies, Orders and Activity sections inside it</li><li>Keep approved catalogue, order, payment and support updates synchronized automatically</li>',
+             '<li>Read only the business page and content you select</li><li>Prepare a clear preview of the profile, catalogue and policies found there</li><li>Import nothing until you approve it in Tally</li>')
+    .replace('<strong>Your authorization is the approval</strong><p>By continuing, you authorize Tally to read the page you select and create or update its managed sections. SQL remains the authoritative transaction record.</p>',
+             '<strong>You stay in control</strong><p>Connecting grants Tally read access to the page you select. You will review the extracted business information in Tally before anything is imported.</p>')
+    .replace('Authorize and set up Notion','Connect Notion')
+    .replace('Notion controls page access · Tally stores transactional state securely',
+             'Notion controls page access · Tally imports only after your approval'))
+
 def _connection_result_html(title,message,success=True):
     icon='✓' if success else '!'
     icon_class='result-icon' if success else 'result-icon error'
@@ -216,7 +227,9 @@ NO_STORE_HEADERS={'Cache-Control':'no-store','Referrer-Policy':'no-referrer',
 
 @app.get('/integrations/notion/setup')
 async def notion_setup_page():
-    return HTMLResponse(NOTION_SETUP_HTML,headers=NO_STORE_HEADERS)
+    managed_sync=os.getenv('TALLY_NOTION_MANAGED_SYNC_ENABLED','true').lower()=='true'
+    html=NOTION_SETUP_HTML if managed_sync else NOTION_SOURCE_SETUP_HTML
+    return HTMLResponse(html,headers=NO_STORE_HEADERS)
 
 @app.post('/integrations/notion/start')
 async def notion_start(request:Request):
@@ -247,13 +260,22 @@ async def notion_callback(request:Request):
                             status_code=400,headers=NO_STORE_HEADERS)
     try:
         result=await complete_notion_oauth(code,state)
-        parent_page_id=select_notion_workspace_parent(result['business_id'])
-        workspace=initialize_notion_workspace_for_business(
-            result['business_id'],parent_page_id,backfill=True)
         count=len(result['authorized_resources'])
         readable=sum(item.get('read_status')=='readable' for item in result['authorized_resources'])
-        backfill=workspace.get('backfill') or {}
-        body=_connection_result_html('Notion connected',f'Tally verified {readable} of {count} authorized resource(s), created the managed business sections and synchronized {backfill.get("products",0)} product(s), {backfill.get("orders",0)} order(s) and {backfill.get("support_cases",0)} support case(s). Future approved updates will be added automatically.')
+        if os.getenv('TALLY_NOTION_MANAGED_SYNC_ENABLED','true').lower()=='true':
+            parent_page_id=select_notion_workspace_parent(result['business_id'])
+            workspace=initialize_notion_workspace_for_business(
+                result['business_id'],parent_page_id,backfill=True)
+            backfill=workspace.get('backfill') or {}
+            message=(f'Tally verified {readable} of {count} authorized resource(s), created the '
+                     f'managed business sections and synchronized {backfill.get("products",0)} '
+                     f'product(s), {backfill.get("orders",0)} order(s) and '
+                     f'{backfill.get("support_cases",0)} support case(s). Future approved updates '
+                     'will be added automatically.')
+        else:
+            message=(f'Tally verified {readable} of {count} authorized resource(s). Return to '
+                     'Tally to preview the business profile, catalogue and policies before import.')
+        body=_connection_result_html('Notion connected',message)
         return HTMLResponse(body,headers=NO_STORE_HEADERS)
     except (ValueError,ToolFailure) as exc:
         reference='tly-'+secrets.token_hex(5)

@@ -87,9 +87,11 @@ def _attach_admin_setup_links(channel,name,result):
                 links['paystack']={'status':'unavailable','error':ex.code,'support_reference':reference}
     if os.getenv('TALLY_NOTION_CONNECTIONS_ENABLED','false').lower()=='true':
         notion=integrations.get('notion') or {}
-        if notion.get('connection_status')=='connected' and notion.get('workspace_status')=='active':
-            links['notion']={'status':'connected','workspace_status':'active',
-                             'managed_sections':notion.get('managed_sections',5)}
+        if (notion.get('connection_status')=='connected' and
+                notion.get('workspace_status') in ('active','source_connected')):
+            links['notion']={'status':'connected','workspace_status':notion.get('workspace_status')}
+            if notion.get('workspace_status')=='active':
+                links['notion']['managed_sections']=notion.get('managed_sections',5)
         else:
             from .notion_connections import issue_notion_setup_link
             try:

@@ -82,8 +82,11 @@ def _integration_status(c,business_id):
                         (business_id,)).fetchone()
     notion_connected='notion' in connections
     paystack_connected='paystack' in connections
+    managed_sync=os.getenv('TALLY_NOTION_MANAGED_SYNC_ENABLED','true').lower()=='true'
     notion={'connection_status':'connected' if notion_connected else 'not_connected',
-            'workspace_status':'active' if workspace else ('pending' if notion_connected else 'not_configured')}
+            'workspace_status':('active' if workspace else
+                                ('source_connected' if notion_connected and not managed_sync else
+                                 ('pending' if notion_connected else 'not_configured')))}
     if workspace:
         notion['workspace_url']='https://www.notion.so/'+workspace['parent_page_id'].replace('-','')
         notion['managed_sections']=5
@@ -416,12 +419,17 @@ def get_catalog(channel='shop',session_token=None,shop_slug=None,notion_resource
                                    WHERE business_id=? AND provider='notion' ORDER BY title''',(business_id,)).fetchall()
             profile=result['business_profile']
             policies=result['policies']
+            import_resources=[]
+            for row in resources:
+                metadata=json.loads(row['metadata_json'] or '{}')
+                if metadata.get('managed_by')!='tally':
+                    import_resources.append(row)
             result['onboarding']={'status':settings['onboarding_status'],
                                   'payment_method':settings['payment_method'],
                                   'integrations':_integration_status(c,business_id),
                                   'notion_resources':[
                                       {key:row[key] for key in ('resource_id','resource_type','title')}
-                                      for row in resources],
+                                      for row in import_resources],
                                   'sections':{
                                       'business_profile':{'status':'saved' if profile else 'not_started',
                                                           'recommended':True},
@@ -437,7 +445,7 @@ def get_catalog(channel='shop',session_token=None,shop_slug=None,notion_resource
             notion_status=result['onboarding']['integrations']['notion']
             if (not notion_resource_id and notion_status['connection_status']=='connected'):
                 auto_notion_resources=_preferred_notion_import_resources(
-                    resources,not profile,not products,not policies)
+                    import_resources,not profile,not products,not policies)
     if channel=='desk' and notion_resource_id:
         from .notion_connections import preview_notion_resource_sync
         result['notion_preview']=preview_notion_resource_sync(session_token,notion_resource_id)
