@@ -7,10 +7,12 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 from server.app import app,mcp_context_shape
-from server.business import (seed,issue_link_code,link_identity,get_catalog,upsert_product,
-    create_order,record_payment_claim,get_my_order,get_reconciliation_report,get_inventory_alerts,
+from server.db import tx, init_db
+from server.business import (issue_link_code,link_identity,get_catalog,upsert_product,
+    create_order,record_payment_claim,get_my_order,get_order_queue,get_reconciliation_report,get_inventory_alerts,
     get_merchant_catchup,update_order_status,create_support_case,list_support_cases,
     reply_support_case,get_my_support_case,ToolFailure,record_stock_adjustment)
+from tests.demo_seed import DEMO_BUSINESS_ID,seed_demo
 
 @pytest.fixture(autouse=True)
 def setup(tmp_path,monkeypatch):
@@ -19,12 +21,12 @@ def setup(tmp_path,monkeypatch):
     monkeypatch.setenv('TALLY_SHOP_MCP_TOKEN','SHOP_SUPER_LONG_RANDOM_TEST_SECRET')
     monkeypatch.setenv('TALLY_DESK_MCP_TOKEN','DESK_OTHER_LONG_RANDOM_TEST_SECRET')
     monkeypatch.setenv('TALLY_WEBHOOK_SECRET','WEBHOOK_LONG_RANDOM_TEST_SECRET')
-    seed()
+    seed_demo()
 
 def sess(actor,channel):return link_identity(issue_link_code(actor),channel)['session_token']
 
 def pay_http(order_id, amount_minor, event_id=None, invalid=False, currency="NGN"):
-    event={'event_id':event_id or uuid.uuid4().hex,'reference':order_id,'amount_minor':amount_minor,'currency':currency,'event_status':'success'}
+    event={'event_id':event_id or uuid.uuid4().hex,'business_id':DEMO_BUSINESS_ID,'reference':order_id,'amount_minor':amount_minor,'currency':currency,'event_status':'success'}
     body=json.dumps(event,separators=(',',':')).encode()
     ts=str(int(time.time()))
     sig='sha256='+hmac.new(os.environ['TALLY_WEBHOOK_SECRET'].encode(),ts.encode()+b'.'+body,hashlib.sha256).hexdigest()
@@ -50,6 +52,20 @@ def test_mcp_context_shape_records_names_not_values():
     assert shape['arguments_meta_keys']==['thread_id']
     assert 'DO_NOT_LOG' not in json.dumps(shape)
 
+
+def test_app_startup_does_not_seed_a_default_merchant():
+    with tx() as conn:
+        conn.execute("DELETE FROM products WHERE business_id=?",(DEMO_BUSINESS_ID,))
+        conn.execute("DELETE FROM actors WHERE business_id=?",(DEMO_BUSINESS_ID,))
+        conn.execute("DELETE FROM business_settings WHERE business_id=?",(DEMO_BUSINESS_ID,))
+        conn.execute("DELETE FROM businesses WHERE id=?",(DEMO_BUSINESS_ID,))
+    with TestClient(app) as client:
+        assert client.get('/healthz').status_code == 200
+    with tx() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM businesses WHERE id=?",(DEMO_BUSINESS_ID,)
+        ).fetchone()[0] == 0
+
 def test_two_roles_restrict_data_and_edits():
     customer=sess('cust-ada','shop'); another=sess('cust-bola','shop');op=sess('staff-tola','desk')
     admin=sess('staff-eni','desk')
@@ -66,13 +82,13 @@ def test_two_roles_restrict_data_and_edits():
 
 def test_catalog_stock_and_order_idempotency():
     customer=sess('cust-ada','shop')
-    assert next(p for p in get_catalog()['products'] if p['id']=='cup-vanilla')['available'] is False
+    assert next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products'] if p['id']=='cup-vanilla')['available'] is False
     with pytest.raises(ToolFailure) as e:create_order(customer,[{'product_id':'cup-vanilla','quantity':1}],'req-two')
     assert e.value.code=='OUT_OF_STOCK'
     order=create_order(customer,[{'product_id':'cup-choc','quantity':2}],'req-three')
     same=create_order(customer,[{'product_id':'cup-choc','quantity':2}],'req-three')
     assert same['duplicate'] and same['order_id']==order['order_id']
-    p=next(p for p in get_catalog()['products'] if p['id']=='cup-choc')
+    p=next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products'] if p['id']=='cup-choc')
     assert p['available_qty']==12
     assert order['total_minor']==500000
 
@@ -102,12 +118,121 @@ def test_order_status_and_inventory_warnings():
     with pytest.raises(ToolFailure) as e:update_order_status(op,order['order_id'],'dispatched')
     assert e.value.code=='INVALID_TRANSITION'
     assert pay_http(order['order_id'],1950000).json()['match_status']=='matched'
-    for state in ['preparing','dispatched','fulfilled']:
+    for state in ['preparing','dispatched','delivery_reported']:
         assert update_order_status(op,order['order_id'],state)['status']==state
+    assert get_my_order(customer,order['order_id'],confirm_received=True,
+                        confirmation_note='Received in good condition')['status']=='fulfilled'
     assert get_my_order(customer,order['order_id'])['status']=='fulfilled'
     with pytest.raises(ToolFailure) as e:record_stock_adjustment(op,'brownie',2,'Physical recount')
     assert e.value.code=='FORBIDDEN'
     assert record_stock_adjustment(admin,'brownie',1,'Physical recount')['new_qty']==1
+
+
+def test_merchant_delivery_report_queues_customer_confirmation_then_fulfils():
+    customer=sess('cust-ada','shop');operator=sess('staff-tola','desk')
+    order=create_order(customer,[{'product_id':'brownie','quantity':1}],'offline-fulfilled')
+    assert pay_http(order['order_id'],650000).json()['match_status']=='matched'
+    reported=update_order_status(operator,order['order_id'],'delivery_reported')
+    assert reported['previous_status']=='confirmed'
+    assert reported['status']=='delivery_reported'
+    assert reported['skipped_statuses']==['preparing','dispatched']
+    assert reported['customer_confirmation']['status']=='pending'
+    resumed=link_identity(issue_link_code('cust-ada'),'shop')
+    action=next(item for item in resumed['pending_actions'] if item['order_id']==order['order_id'])
+    assert action['kind']=='confirm_delivery'
+    fulfilled=get_my_order(customer,order['order_id'],confirm_received=True,
+                           confirmation_note='Received, thank you')
+    assert fulfilled['status']=='fulfilled'
+    assert fulfilled['recorded_from']=='customer'
+    product=next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products']
+                 if p['id']=='brownie')
+    assert product['available_qty']==4
+
+
+def test_customer_receipt_confirmation_fulfils_only_their_paid_order_once():
+    customer=sess('cust-ada','shop')
+    order=create_order(customer,[{'product_id':'cup-choc','quantity':2}],'customer-received')
+    with pytest.raises(ToolFailure) as error:
+        get_my_order(customer,order['order_id'],confirm_received=True)
+    assert error.value.code=='INVALID_TRANSITION'
+    assert pay_http(order['order_id'],500000).json()['match_status']=='matched'
+    received=get_my_order(
+        customer,order['order_id'],confirm_received=True,
+        confirmation_note='Order delivered, thank you')
+    assert received['status']=='fulfilled'
+    assert received['skipped_statuses']==['preparing','dispatched','delivery_reported']
+    assert received['recorded_from']=='customer'
+    repeated=get_my_order(customer,order['order_id'],confirm_received=True)
+    assert repeated['status']=='fulfilled' and repeated['duplicate'] is True
+    product=next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products']
+                 if p['id']=='cup-choc')
+    assert product['available_qty']==12
+
+def test_pickup_order_uses_short_customer_updates_and_pickup_ready_confirmation():
+    with tx() as conn:
+        conn.execute('UPDATE business_settings SET profile_json=?,policies_json=? WHERE business_id=?',(
+            json.dumps({'address':'1 Herethere, Lagos'}),
+            json.dumps([{'question':'How are orders fulfilled?','answer':'Pickup only.'}]),
+            DEMO_BUSINESS_ID))
+    customer=sess('cust-ada','shop');operator=sess('staff-tola','desk')
+    order=create_order(customer,[{'product_id':'brownie','quantity':1}],'pickup-status')
+    assert order['fulfillment_method']=='pickup'
+    assert next(x for x in get_order_queue(operator)['orders']
+                if x['id']==order['order_id'])['fulfillment_method']=='pickup'
+    assert pay_http(order['order_id'],650000).json()['match_status']=='matched'
+    confirmed=get_my_order(customer,order['order_id'])
+    assert confirmed['status']=='confirmed'
+    assert confirmed['customer_reply']==(
+        "Your payment is confirmed. I don't have a pickup-ready update yet—would you like me to ask the shop?")
+    assert 'Brownie' not in confirmed['customer_reply']
+    assert '6500' not in confirmed['customer_reply']
+    with pytest.raises(ToolFailure) as error:
+        update_order_status(operator,order['order_id'],'dispatched')
+    assert error.value.code=='INVALID_TRANSITION'
+    ready=update_order_status(operator,order['order_id'],'ready_for_pickup')
+    assert ready['status']=='ready_for_pickup'
+    assert ready['customer_confirmation']['status']=='pending'
+    assert ready['customer_confirmation']['outbound_message']=='not_verified'
+    ready_status=get_my_order(customer,order['order_id'])
+    assert ready_status['customer_reply']=='Your order is ready for pickup at 1 Herethere, Lagos.'
+    linked=link_identity(issue_link_code('cust-ada'),'shop')
+    assert any(x['kind']=='confirm_pickup' for x in linked['pending_actions'])
+    fulfilled=get_my_order(customer,order['order_id'],confirm_received=True,
+                           confirmation_note='Picked up, thank you')
+    assert fulfilled['status']=='fulfilled'
+    assert fulfilled['customer_reply'].endswith('Test Merchant Fixture.')
+    product=next(p for p in get_catalog(shop_slug='test-merchant-fixture')['products']
+                 if p['id']=='brownie')
+    assert product['available_qty']==4
+
+def test_existing_orders_table_gets_additive_fulfillment_method_migration(tmp_path,monkeypatch):
+    legacy_path=tmp_path/'legacy.db'
+    import sqlite3
+    with sqlite3.connect(legacy_path) as conn:
+        conn.execute('''CREATE TABLE orders (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL, customer_id TEXT NOT NULL,
+            total_minor INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+        conn.execute("INSERT INTO orders VALUES('old-order','b','c',100,'NGN','confirmed','k','t','t')")
+    monkeypatch.setenv('TALLY_DB_PATH',str(legacy_path))
+    init_db()
+    with sqlite3.connect(legacy_path) as conn:
+        columns={row[1] for row in conn.execute('PRAGMA table_info(orders)')}
+        method=conn.execute('SELECT fulfillment_method FROM orders WHERE id=?',('old-order',)).fetchone()[0]
+    assert 'fulfillment_method' in columns
+    assert method=='delivery'
+
+
+def test_customer_disputes_merchant_delivery_report_into_support_queue():
+    customer=sess('cust-ada','shop');operator=sess('staff-tola','desk')
+    order=create_order(customer,[{'product_id':'brownie','quantity':1}],'delivery-dispute')
+    assert pay_http(order['order_id'],650000).json()['match_status']=='matched'
+    update_order_status(operator,order['order_id'],'delivery_reported')
+    disputed=create_support_case(
+        customer,'complaint','I have not received this order',order['order_id'])
+    assert disputed['delivery_dispute'] is True
+    assert get_my_order(customer,order['order_id'])['status']=='delivery_reported'
+    assert any(case['id']==disputed['case_id'] for case in list_support_cases(operator)['cases'])
 
 
 def test_case_privacy_staff_replies_and_catchup():
@@ -139,9 +264,31 @@ def test_mcp_discovery_role_isolation_and_real_tool_invocation():
     assert 'create_order' not in d_names
     called=client.post('/mcp/shop',headers=shop_h,json={'jsonrpc':'2.0','id':4,'method':'tools/call','params':{'name':'get_catalog','arguments':{}}}).json()
     result=json.loads(called['result']['content'][0]['text'])
-    assert any(x['id']=='cup-choc' for x in result['products'])
+    assert called['result']['isError'] is True
+    assert result['error']=='SHOP_CONTEXT_REQUIRED'
+    scoped=client.post('/mcp/shop',headers=shop_h,json={'jsonrpc':'2.0','id':6,'method':'tools/call','params':{'name':'get_catalog','arguments':{'shop_slug':'test-merchant-fixture'}}}).json()
+    scoped_result=json.loads(scoped['result']['content'][0]['text'])
+    assert any(x['id']=='cup-choc' for x in scoped_result['products'])
     blocked=client.post('/mcp/shop',headers=shop_h,json={'jsonrpc':'2.0','id':5,'method':'tools/call','params':{'name':'get_reconciliation_report','arguments':{}}}).json()
     assert blocked['result']['isError'] is True
+
+def test_mcp_failure_is_correlated_without_logging_merchant_values(caplog):
+    client=TestClient(app)
+    headers={'Authorization':'Bearer SHOP_SUPER_LONG_RANDOM_TEST_SECRET'}
+    with caplog.at_level('WARNING',logger='uvicorn.error'):
+        response=client.post('/mcp/shop',headers=headers,json={
+            'jsonrpc':'2.0','id':7,'method':'tools/call',
+            'params':{'name':'get_my_order','arguments':{
+                'session_token':'DO_NOT_LOG_PRIVATE_SESSION',
+                'order_id':'DO_NOT_LOG_PRIVATE_ORDER',
+            }},
+        }).json()
+    result=json.loads(response['result']['content'][0]['text'])
+    assert response['result']['isError'] is True
+    assert result['support_reference'].startswith('tly-')
+    assert result['support_reference'] in caplog.text
+    assert 'channel=shop tool=get_my_order' in caplog.text
+    assert 'DO_NOT_LOG_PRIVATE' not in caplog.text
 
 def test_idempotency_conflict_and_time_window():
     customer=sess('cust-ada','shop');staff=sess('staff-eni','desk')

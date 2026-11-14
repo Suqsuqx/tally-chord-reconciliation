@@ -1,4 +1,4 @@
-# Cedar Bakes — Merchant Operations Runbook (Sandbox)
+# Tally Desk — Generic Merchant Operations Runbook (Sandbox)
 
 **Audience:** Authenticated Admin and Operator test staff. **Source type:** Operational guidance, not the live ledger.
 

@@ -1,0 +1,3 @@
+provider,merchant_display_name,currency,payment_method,status,notes
+Paystack,ASYAN SHOP,NGN,Hosted checkout,Business account exists; connection pending,Secure checkout link sent after order confirmation
+Paystack,ASYAN SHOP,NGN,Dedicated virtual account,Subject to eligibility and enablement,Account numbers are not recorded here

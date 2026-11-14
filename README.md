@@ -8,32 +8,26 @@ This repository is an assessment sandbox, not a production payment or identity s
 
 ## What is actually implemented
 
-- SQLite schema, seeded fictitious merchant/product/staff records and audit entries.
+- Additive multi-tenant SQLite schema with conversational sandbox merchant registration, sender-to-business routing and tenant-scoped customers. A registration message creates a new empty business; approved business data and catalogue arrive afterward through chat, files or Notion.
+- Tally starts with no runtime merchant, catalogue or customer-facing business identity. Shop requires an active merchant context; isolated tests create their own generic fixture outside runtime modules.
+- Desk derives an arbitrary business name from the merchant's message and creates an empty private tenant. Each Shop MCP deployment is server-bound to exactly one configured slug, so its customer teammate cannot select or switch merchants.
+- Successful activation returns a stable `/shop/{slug}` entry URL. That route exists only while the bound business is active and redirects to the configured customer channel (the TSG simulator for this assessment; a verified WhatsApp target in a live adapter).
 - Shop and Desk JSON-RPC Streamable HTTP MCP endpoints with distinct bearer authentication and tool allowlists.
-- Server-side per-actor Admin/Operator/Customer rules using one-time **sandbox** identity-link codes and short-lived sessions.
-- Stock reservation, idempotent order creation, signed sandbox payment events (not customer-visible MCP), reconciliation report, merchant catch-up, low-stock alerts, order status and case-specific customer support.
+- Server-side Admin/Operator/Customer rules with legacy one-time codes plus explicit **unverified simulator sender routing**. The live contract remains authenticated WhatsApp-number identity; typed numbers are never authorization.
+- Customer name and Paystack email memory scoped to the authenticated sender and merchant, stock reservation, idempotent order creation, signed sandbox payment events (not customer-visible MCP), reconciliation, low-stock alerts and case-specific support.
+- Payment confirmation remains a hard fulfilment gate. Pickup-only orders use `confirmed → preparing → ready_for_pickup → fulfilled`; delivery orders use `confirmed → preparing → dispatched → delivery_reported → fulfilled`. Merchants may record offline progress, customer confirmation promotes a paid order to fulfilled, skipped stages are audited and stock is deducted exactly once. Customer status lookups return a concise, deterministic reply instead of requiring Shop to replay the whole order.
 - Automated tests (`pytest`) for identity isolation, payment mismatch/idempotency, out-of-stock and fulfilment failure scenarios.
+- Merchant connections use short-lived Paystack/Notion setup links and AES-GCM encrypted per-business credentials. Notion authorization creates or resumes five Tally-managed sections under the selected business page—Profile, Catalogue, Policies, Orders and Activity—and mirrors approved SQL records there. Merchant-authored source content remains previewed and imported only after Admin approval; SQL remains authoritative. A recording reset backs up SQLite, moves only Tally-owned Notion pages to Notion Trash, then clears the ledger. Paystack onboarding needs only a `transactions:write` restricted TEST key; webhook signing is optional. Paystack requires an email before checkout initialization, so Tally asks once and reuses it for that authenticated customer. The hosted page presents the merchant's enabled payment channels. Manual-bank orders require audited Admin confirmation and remain separately labelled.
 
-## Verification status — 6 November 2026
+## Verification and submission status — 14 November 2026
 
-Independently observed:
+**Most recent technical evidence:** `docs/DEPLOYMENT_FIELD_NOTES.md` reports 62 passing tests on source and deployed checkouts, local/public health `status: ok` in sandbox mode, SQLite integrity OK, and an authenticated Chord scope audit confirming **7 Shop / 11 Desk tools**. The last 14 November code baseline before this documentation update is `8aedc3448ad3972fb290cd065be051a347aec758`.
 
-- `tally.service` running one Uvicorn worker behind Nginx/TLS at `https://tally.mbrelabs.world`.
-- Local and public `/healthz` responses report `status: ok` and `environment: sandbox`.
-- `9 passed` before and after the live verification journey.
-- Chord teammate isolation: Tally Shop has only the Shop MCP server; Tally Desk has only Desk; the native Chord Assistant has only a disabled deny server.
-- Chord health and discovery: exactly 7 Shop tools and 11 Desk tools.
-- Actual Chord-origin Shop and Desk tool invocations through persisted external-chat turns.
-- Synthetic order `awaiting_payment` after a customer claim, `confirmed` only after a valid signed event, then fulfilled with correct stock accounting.
-- Bad/missing/stale signatures, wrong amounts, unknown references, changed duplicate events, cross-customer access, Operator admin writes, unpaid dispatch, idempotency conflicts and sold-out orders fail safely.
+**Merchant and provider proof:** The 13 November ASYAN SHOP session genuinely connected Tally's Notion OAuth integration, created five managed sections and read back nine generated pages via Notion's API. Provider setup reached connected status; the final Paystack TEST transaction and freshly repeated Notion import/order readback must be confirmed against the submitted recording and sanitized traces. The 14 November protected recording reset preserved merchant-authored ASYAN pages while removing Tally's generated pages, credentials and merchant ledger for a clean demo.
 
-Still pending for the assessment submission:
+**Recording and submission:** The founder reports the final video **recorded**. This repository does not yet have a verified evaluator-facing video URL, playback inspection, Google Drive package, or sent email receipt. Native same-thread takeover and outbound message delivery should not be claimed without corresponding channel evidence.
 
-- Authenticated TSG Channel simulator UI capture and ≤3-minute recording.
-- Native human takeover/delivery/hand-back proof.
-- Evaluator-accessible Drive package and sent email receipt.
-
-See `docs/DEPLOYMENT_FIELD_NOTES.md` for the evidence summary and honest limitations.
+**Technical boundaries:** The simulator sender is not authenticated WhatsApp ownership; payment claims are not settlement, and support-case replies are not delivery receipts. Tally refuses non-sandbox operation. Detailed product reasoning, merchant instructions, and provider security are documented in `docs/MVP_SCOPE_v1.2.md`, `docs/GO_LIVE_NOTE.md` and `docs/PROVIDER_CONNECTIONS.md`.
 
 ## Quick local start
 
@@ -46,6 +40,15 @@ set -a; . ./.env; set +a
 .venv/bin/python -m pytest tests -q
 .venv/bin/uvicorn server.app:app --host 127.0.0.1 --port 8787
 ```
+
+## Recording reset
+
+To reset the sandbox after a recording pass, stop `tally.service`, load the private
+environment, and run `scripts/reset_recording.py --execute --confirm "RESET TALLY RECORDING"`.
+The script first creates a mode-`0600` SQLite backup, moves only pages recorded as
+Tally-owned into Notion Trash, and replaces the SQLite ledger with the current empty
+schema. The merchant-selected Notion parent and merchant-authored source pages remain.
+If Notion cleanup fails, the database is left intact so the reset can be retried.
 
 In another shell, run `scripts_utility.py issue-code cust-ada` and `scripts_utility.py issue-code staff-eni` to generate unique link codes, or use the tool demo through Chord after deployment.
 
@@ -79,7 +82,11 @@ The script prints names, enabled state, scope checks, health and tool names; it 
 
 ## Test/live boundary
 
-Sandbox only. No live merchant data, real WhatsApp numbers, production payment keys or channel-bound identity attestation. Chord API/external-chat tool calls were observed, but that does not substitute for the still-pending Channel simulator UI recording or native handoff proof. A stored support reply is not proof of customer delivery.
+Sandbox only. No live merchant data, real WhatsApp numbers, production payment keys or channel-bound identity attestation. Historical Chord API/external-chat tool calls are not substitutes for a Channel simulator recording. The founder reports that recording is now complete, but its individual events and any native human handoff still require playback/trace review. A stored support reply is not proof of customer delivery.
+
+Provider code is disabled unless its explicit feature flag is enabled. Merchant Paystack credentials go only through the HTTPS form and are encrypted per business; Notion uses Tally's OAuth client and encrypted per-business tokens. Conversational registration, document approval, provider setup and Shop activation extend the existing tools without changing the seven-Shop/eleven-Desk counts. Source tests are not live-provider proof; see `docs/PROVIDER_CONNECTIONS.md` for activation gates.
+
+`TALLY_SHOP_BOUND_SLUG` and `TALLY_SHOP_AGENT_URL` are deployment-level channel bindings, not merchant data defaults. One Shop agent instance must have one bound active business. Desk remains generic and can register other businesses, but each additional customer-facing Shop channel needs its own authenticated adapter binding before it is reachable.
 
 ## AI usage declaration
 

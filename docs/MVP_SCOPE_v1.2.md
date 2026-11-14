@@ -1,8 +1,8 @@
 # Tally — Reconciliation-First MVP Scope
 
 **Project:** TSG Labs Chord Build Exercise  
-**Version:** 1.2 · 5 November 2026  
-**Status:** Sandbox backend, VPS HTTPS service, Chord MCP health/discovery, real Chord-origin Shop/Desk tool calls, signed-payment journey and security failures verified on 6 November 2026. Authenticated Channel simulator UI evidence and native handoff remain pending.
+**Version:** 1.2 · submission refresh 14 November 2026  
+**Status:** Sandbox backend deployed; 62 tests reported passing on source and VPS; genuine Notion OAuth write/readback observed on 13 November; clean recording reset verified 14 November. Founder reports simulator video recorded; external playback, final Paystack event and native handoff are not independently reviewed here.
 
 ## 1. Purpose and success definition
 
@@ -10,9 +10,23 @@ Tally is a WhatsApp-first business operations assistant that keeps merchant orde
 
 **MVP proof:** in TSG Labs' Chord WhatsApp simulator, a customer places an order; their payment report stays unverified; an authenticated sandbox payment event is matched against the order; the merchant retrieves the reconciliation result, catches up on orders and support, and sees a low-stock alert. Failures must be handled safely and demonstrably.
 
+## Product rationale — assessment submission
+
+**Why Tally exists.** Small merchants already keep information in everyday business documents and payment providers but lack a single reliable account of what customers ordered, whether they actually paid, what stock remains and what the merchant must do next. A generic chat agent can answer FAQs; Tally's stronger value is its **deterministic operational ledger and reconciliation**, exposed through natural Shop and Desk conversations.
+
+**Why two teammates, one merchant demonstration.** Customers need a narrow, safe Shop surface; owners/operators need a privileged Desk surface. This split enforces separate tool lists and backend role checks. The demonstration intentionally uses one ASYAN SHOP Shop binding, although Desk registration and the data model are generic. The Shop endpoint is **not** an open marketplace or a universal merchant switcher.
+
+**Why connect existing records instead of scripting a bot.** Onboarding starts by creating an empty business, then brings in the merchant's own Notion information or CSVs through an authorized, preview-and-approve workflow. It demonstrates useful setup from the business's existing data, while keeping merchant-authored content distinct from operational ledger entries. Tally-owned Notion sections are readable mirrors; merchant source pages remain independently owned.
+
+**Why Paystack is separate.** A customer's claim or uploaded evidence must not make an order paid. The merchant's own restricted TEST credential is provided via a scoped HTTPS setup form and encrypted per business; Paystack verification or a separately signed sandbox event is the payment authority. Manual-bank confirmation is an explicitly audited alternate flow and is never presented as an automatic Paystack transaction.
+
+**Why this is not production.** Simulator sender fields do not prove WhatsApp-number ownership, native takeover and message delivery need channel proof, and the server is sandbox-only. Merchant connections and live-provider checks are reported with precise evidence boundaries. The short recording is a user-reported completed artifact pending independent playback review.
+
+**Assessment success:** An outsider can follow a genuine empty signup, authorized business-data import, customer order and truthful payment state, then retrieve the same order, fulfilment, inventory and support facts in Desk and a readable Notion mirror. Any omitted provider or channel proof must be labelled, not filled with a simulated claim.
+
 ## 2. Experience, actors and permissions
 
-Two separately configured Chord teammates work with a single sandbox merchant (Cedar Bakes), one sandbox database and explicit tool scopes.
+Two separately configured Chord teammates work with sandbox merchants in one multi-tenant database and explicit tool scopes. A merchant is created conversationally; runtime code contains no default merchant or catalogue.
 
 | Teammate / actor | Purpose and accessible operations |
 |---|---|
@@ -26,16 +40,18 @@ Multiple individual staff may hold Admin or Operator roles. Business membership,
 
 ## 3. Merchant setup and catalogue
 
-The assessment begins with an already configured test business and test staff memberships. An Admin uses Tally Desk to add or update a small catalogue by conversational text. Tally previews names, prices, stock counts and warning thresholds before calling the catalogue tool. The API accepts NGN amounts as integer **kobo** and calculates available quantity as physical stock on hand minus units reserved on existing orders. The customer agent reads the same persisted catalogue, and order creation rechecks availability transactionally.
+The assessment begins when the merchant messages Tally Desk to register a business. That message creates an empty tenant and assigns the current simulator sender as its sandbox Admin; it does not claim or copy a pre-registered business. Desk guides four readable sections—business profile, catalogue, policies and payment—while keeping only catalogue plus payment as activation blockers. The Admin supplies information through step-by-step conversation, uploaded files or authorized Notion documents; fields already supplied are skipped and grouped information is previewed once before approval. An authorized Notion parent can become a merchant-readable workspace with Profile, Catalogue, Policies & FAQ, Orders, and Activity & Reconciliation sections. SQL remains authoritative and approved records are mirrored to Notion. The API accepts NGN amounts as integer **kobo** and calculates available quantity as physical stock on hand minus units reserved on existing orders.
+
+Desk is business-name agnostic: it derives the exact requested name and creates that tenant. A customer-facing Shop instance is not a marketplace. Its MCP deployment is bound server-side to one activated business, exposes no merchant selector, and returns a stable entry URL after activation. The assessment Shop binding points to the single simulator agent; a live adapter would bind an equivalent business-specific link or verified WhatsApp route.
 
 ## 4. Customer order and payment reconciliation
 
-1. Tally Shop reads current product availability and confirms requested quantities and total with the customer.
+1. Tally Shop reads current product availability and confirms requested quantities and total with the customer. It may remember a customer-provided name and Paystack email against the same authenticated sender/business identity.
 2. `create_order` rechecks stock, calculates prices from the database, reserves units and returns one persisted order reference. Idempotency keys prevent duplicate orders; a reused key with different items is rejected.
 3. The order starts as `awaiting_payment`. A transfer message or screenshot is recorded only by `record_payment_claim` and **does not** confirm an order.
 4. A separate sandbox provider endpoint accepts a successful signed payment event with event ID, reference, amount and currency. The backend validates its signature and freshness, matches the reference/amount/currency, and deduplicates the event ID.
 5. A matching valid event moves the order to `confirmed`; an unknown reference, mismatch or already processed order remains an exception in the payment report. A duplicate event has no second settlement effect.
-6. The Admin or Operator progresses the order: `confirmed` → `preparing` → `dispatched` → `fulfilled`. Unpaid dispatch is rejected. Stock is reserved on order creation and deducted from on-hand quantities at fulfilment.
+6. Payment confirmation is the hard gate. Pickup-only orders follow `confirmed → preparing → ready_for_pickup → fulfilled`; delivery orders follow `confirmed → preparing → dispatched → delivery_reported → fulfilled`. An Admin or Operator may record offline progress or skip stages, with skipped states audited. A ready-for-pickup or delivery report queues the corresponding customer confirmation. The authenticated customer can confirm collection/receipt, promoting the order to `fulfilled`, or dispute a delivery, opening a support case. A merchant may record fulfilment only with an explicit offline customer-confirmation note. Unpaid fulfilment is rejected and stock is deducted exactly once at fulfilment. Simple customer status queries use a concise backend-provided reply, without repeating the basket or exposing internal checking commentary.
 
 **Reconciliation report:** total matched verified receipts; count and amount of unpaid orders; unresolved customer payment claims; unmatched references, amount mismatches and duplicate-safe event outcomes. Money values are computed by tools and clearly distinguish verified receipts from unpaid expectations and claims.
 
@@ -82,7 +98,7 @@ Tools currently implemented in the local code are named in `docs/TOOL_REGISTER.m
 | **F1** | Out of stock | Order rejected; no order persisted; customer receives a natural availability explanation. |
 | **A3** | Payment reconciliation | Customer claim leaves order unpaid; signed matching event confirms once; merchant report reflects matched verified receipt. |
 | **F2** | Payment anomaly | Bad signature, wrong amount, unknown reference and duplicate event do not falsely confirm or double-count a payment. |
-| **A4** | Fulfilment and stock | Unpaid dispatch rejected; valid paid transitions succeed; reserved/physical quantity and low-stock alert are correct. |
+| **A4** | Fulfilment and stock | Unpaid fulfilment rejected; paid offline progress, two-way delivery confirmation and disputes are audited; stock is deducted exactly once and alerts remain correct. |
 | **A5** | Merchant catch-up | Desk returns recent activity and actionable reconciliation, support and stock exceptions from tools. |
 | **A6** | Customer service | Customer complaint creates a merchant-visible case; staff response is stored; customer retrieves that response only from their own case. |
 | **V1** | Native human handoff | In simulator, verify takeover, direct human reply, channel delivery and hand-back where supported; log any unsupported link accurately. |

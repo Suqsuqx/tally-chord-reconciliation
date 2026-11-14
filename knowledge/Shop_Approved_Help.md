@@ -1,4 +1,4 @@
-# Cedar Bakes — Customer Help (Sandbox)
+# Tally Shop — Generic Customer Help (Sandbox)
 
 **Audience:** Customers. **Source type:** Approved general guidance, not live commerce records.
 
